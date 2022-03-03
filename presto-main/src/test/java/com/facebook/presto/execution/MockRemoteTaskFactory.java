@@ -113,11 +113,12 @@ public class MockRemoteTaskFactory
 
     public MockRemoteTask createTableScanTask(TaskId taskId, InternalNode newNode, List<Split> splits, NodeTaskMap.NodeStatsTracker nodeStatsTracker)
     {
-        VariableReferenceExpression variable = new VariableReferenceExpression("column", VARCHAR);
+        VariableReferenceExpression variable = new VariableReferenceExpression(Optional.empty(), "column", VARCHAR);
         PlanNodeId sourceId = new PlanNodeId("sourceId");
         PlanFragment testFragment = new PlanFragment(
                 new PlanFragmentId(0),
                 new TableScanNode(
+                        Optional.empty(),
                         sourceId,
                         new TableHandle(new ConnectorId("test"), new TestingTableHandle(), TestingTransactionHandle.create(), Optional.of(TestingHandle.INSTANCE)),
                         ImmutableList.of(variable),

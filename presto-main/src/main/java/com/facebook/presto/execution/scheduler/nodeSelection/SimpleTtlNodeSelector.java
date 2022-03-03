@@ -33,6 +33,7 @@ import com.facebook.presto.spi.schedule.NodeSelectionStrategy;
 import com.facebook.presto.spi.ttl.ConfidenceBasedTtlInfo;
 import com.facebook.presto.spi.ttl.NodeTtl;
 import com.facebook.presto.ttl.nodettlfetchermanagers.NodeTtlFetcherManager;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableMultimap;
@@ -62,7 +63,7 @@ import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
 import static java.lang.String.format;
-import static java.time.temporal.ChronoUnit.MILLIS;
+import static java.time.temporal.ChronoUnit.SECONDS;
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toList;
 
@@ -155,13 +156,20 @@ public class SimpleTtlNodeSelector
         NodeMap nodeMap = this.nodeMap.get().get();
         List<InternalNode> activeNodes = nodeMap.getActiveNodes();
 
-        List<InternalNode> eligibleNodes = filterNodesByTtl(activeNodes, excludedNodes, ttlInfo);
+        Duration estimatedExecutionTimeRemaining = getEstimatedExecutionTimeRemaining();
+        List<InternalNode> eligibleNodes = filterNodesByTtl(activeNodes, excludedNodes, ttlInfo, estimatedExecutionTimeRemaining);
         return selectNodes(limit, new ResettableRandomizedIterator<>(eligibleNodes));
     }
 
     @Override
     public SplitPlacementResult computeAssignments(Set<Split> splits, List<RemoteTask> existingTasks)
     {
+        boolean isNodeSelectionStrategyNoPreference = splits.stream().allMatch(split -> split.getNodeSelectionStrategy() == NodeSelectionStrategy.NO_PREFERENCE);
+        // Current NodeSelectionStrategy support is limited to NO_PREFERENCE
+        if (!isNodeSelectionStrategyNoPreference) {
+            return simpleNodeSelector.computeAssignments(splits, existingTasks);
+        }
+
         ImmutableMultimap.Builder<InternalNode, Split> assignment = ImmutableMultimap.builder();
         NodeMap nodeMap = this.nodeMap.get().get();
         NodeAssignmentStats assignmentStats = new NodeAssignmentStats(nodeTaskMap, nodeMap, existingTasks);
@@ -227,11 +235,12 @@ public class SimpleTtlNodeSelector
         return simpleNodeSelector.computeAssignments(splits, existingTasks, bucketNodeMap);
     }
 
-    private boolean isTtlEnough(ConfidenceBasedTtlInfo ttlInfo, Duration estimatedExecutionTime)
+    @VisibleForTesting
+    public static boolean isTtlEnough(ConfidenceBasedTtlInfo ttlInfo, Duration estimatedExecutionTime)
     {
         Instant expiryTime = ttlInfo.getExpiryInstant();
-        long timeRemaining = MILLIS.between(Instant.now(), expiryTime);
-        return new Duration(Math.max(timeRemaining, 0), TimeUnit.MILLISECONDS).compareTo(estimatedExecutionTime) >= 0;
+        long timeRemainingInSeconds = SECONDS.between(Instant.now(), expiryTime);
+        return new Duration(Math.max(timeRemainingInSeconds, 0), TimeUnit.SECONDS).compareTo(estimatedExecutionTime) >= 0;
     }
 
     private Duration getEstimatedExecutionTimeRemaining()
@@ -254,18 +263,20 @@ public class SimpleTtlNodeSelector
                                 .stream()
                                 .min(Comparator.comparing(ConfidenceBasedTtlInfo::getExpiryInstant))));
 
+        Duration estimatedExecutionTimeRemaining = getEstimatedExecutionTimeRemaining();
         // Of the nodes on which already have existing tasks, pick only those whose TTL is enough
         List<InternalNode> existingEligibleNodes = existingTasks.stream()
                 .map(remoteTask -> nodeMap.getActiveNodesByNodeId().get(remoteTask.getNodeId()))
                 // nodes may sporadically disappear from the nodeMap if the announcement is delayed
                 .filter(Objects::nonNull)
+                .filter(ttlInfo::containsKey)
                 .filter(node -> ttlInfo.get(node).isPresent())
-                .filter(node -> isTtlEnough(ttlInfo.get(node).get(), estimatedExecutionTime))
+                .filter(node -> isTtlEnough(ttlInfo.get(node).get(), estimatedExecutionTimeRemaining))
                 .collect(toList());
 
         int alreadySelectedNodeCount = existingEligibleNodes.size();
         List<InternalNode> activeNodes = nodeMap.getActiveNodes();
-        List<InternalNode> newEligibleNodes = filterNodesByTtl(activeNodes, ImmutableSet.copyOf(existingEligibleNodes), ttlInfo);
+        List<InternalNode> newEligibleNodes = filterNodesByTtl(activeNodes, ImmutableSet.copyOf(existingEligibleNodes), ttlInfo, estimatedExecutionTimeRemaining);
 
         if (alreadySelectedNodeCount < limit && newEligibleNodes.size() > 0) {
             List<InternalNode> moreNodes = selectNodes(limit - alreadySelectedNodeCount, new ResettableRandomizedIterator<>(newEligibleNodes));
@@ -278,14 +289,15 @@ public class SimpleTtlNodeSelector
     private List<InternalNode> filterNodesByTtl(
             List<InternalNode> nodes,
             Set<InternalNode> excludedNodes,
-            Map<InternalNode, Optional<ConfidenceBasedTtlInfo>> ttlInfo)
+            Map<InternalNode, Optional<ConfidenceBasedTtlInfo>> ttlInfo,
+            Duration estimatedExecutionTimeRemaining)
     {
         return nodes.stream()
                 .filter(ttlInfo::containsKey)
                 .filter(node -> includeCoordinator || !node.isCoordinator())
                 .filter(node -> !excludedNodes.contains(node))
                 .filter(node -> ttlInfo.get(node).isPresent())
-                .filter(node -> isTtlEnough(ttlInfo.get(node).get(), getEstimatedExecutionTimeRemaining()))
+                .filter(node -> isTtlEnough(ttlInfo.get(node).get(), estimatedExecutionTimeRemaining))
                 .collect(toImmutableList());
     }
 }

@@ -31,6 +31,7 @@ import org.testng.annotations.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static com.facebook.presto.SessionTestUtils.TEST_SESSION;
 import static com.facebook.presto.common.type.BigintType.BIGINT;
@@ -128,7 +129,7 @@ public class TestCommonSubExpressionRewritter
 
     private VariableReferenceExpression variable(String variable)
     {
-        return new VariableReferenceExpression(variable, TYPES.allTypes().get(variable));
+        return new VariableReferenceExpression(Optional.empty(), variable, TYPES.allTypes().get(variable));
     }
 
     private RowExpression rowExpression(String sql)
@@ -140,7 +141,7 @@ public class TestCommonSubExpressionRewritter
                 new SqlParser(),
                 TYPES,
                 expression,
-                ImmutableList.of(),
+                ImmutableMap.of(),
                 WarningCollector.NOOP);
         return SqlToRowExpressionTranslator.translate(
                 expression,

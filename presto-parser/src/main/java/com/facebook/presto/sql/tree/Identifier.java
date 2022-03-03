@@ -25,7 +25,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 public class Identifier
         extends Expression
 {
-    private static final Pattern NAME_PATTERN = Pattern.compile("[a-zA-Z_]([a-zA-Z0-9_:@])*");
+    private static final Pattern NAME_PATTERN = Pattern.compile("[a-zA-Z_]([a-zA-Z0-9_])*");
 
     private final String value;
     private final boolean delimited;
@@ -38,6 +38,10 @@ public class Identifier
     public Identifier(String value, boolean delimited)
     {
         this(Optional.empty(), value, delimited);
+    }
+    public Identifier(Optional<NodeLocation> location, String value)
+    {
+        this(location, value, !NAME_PATTERN.matcher(value).matches());
     }
 
     public Identifier(String value)

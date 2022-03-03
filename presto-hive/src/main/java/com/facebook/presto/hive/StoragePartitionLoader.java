@@ -44,17 +44,13 @@ import org.apache.hadoop.mapred.InputFormat;
 import org.apache.hadoop.mapred.InputSplit;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.TextInputFormat;
-import org.apache.hudi.hadoop.HoodieParquetInputFormat;
 import org.apache.hudi.hadoop.HoodieROTablePathFilter;
-import org.apache.hudi.hadoop.realtime.HoodieParquetRealtimeInputFormat;
 
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.lang.annotation.Annotation;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Comparator;
 import java.util.Deque;
 import java.util.Iterator;
@@ -72,10 +68,14 @@ import static com.facebook.presto.hive.HiveErrorCode.HIVE_INVALID_FILE_NAMES;
 import static com.facebook.presto.hive.HiveMetadata.shouldCreateFilesForMissingBuckets;
 import static com.facebook.presto.hive.HiveSessionProperties.getMaxInitialSplitSize;
 import static com.facebook.presto.hive.HiveSessionProperties.getNodeSelectionStrategy;
+import static com.facebook.presto.hive.HiveSessionProperties.isFileSplittable;
+import static com.facebook.presto.hive.HiveSessionProperties.isStreamingAggregationEnabled;
 import static com.facebook.presto.hive.HiveSessionProperties.isUseListDirectoryCache;
 import static com.facebook.presto.hive.HiveUtil.getFooterCount;
 import static com.facebook.presto.hive.HiveUtil.getHeaderCount;
 import static com.facebook.presto.hive.HiveUtil.getInputFormat;
+import static com.facebook.presto.hive.HiveUtil.isHudiParquetInputFormat;
+import static com.facebook.presto.hive.HiveUtil.shouldUseFileSplitsFromInputFormat;
 import static com.facebook.presto.hive.HiveWriterFactory.getBucketNumber;
 import static com.facebook.presto.hive.NestedDirectoryPolicy.FAIL;
 import static com.facebook.presto.hive.NestedDirectoryPolicy.IGNORED;
@@ -249,7 +249,7 @@ public class StoragePartitionLoader
                 schedulerUsesHostAddresses,
                 partition.getEncryptionInformation());
 
-        if (!isHudiParquetInputFormat(inputFormat) && shouldUseFileSplitsFromInputFormat(inputFormat)) {
+        if (shouldUseFileSplitsFromInputFormat(inputFormat, configuration, table.getStorage().getLocation())) {
             if (tableBucketInfo.isPresent()) {
                 throw new PrestoException(NOT_SUPPORTED, "Presto cannot read bucketed partition in an input format with UseFileSplitsFromInputFormat annotation: " + inputFormat.getClass().getSimpleName());
             }
@@ -262,11 +262,16 @@ public class StoragePartitionLoader
             return addSplitsToSource(splits, splitFactory, hiveSplitSource, stopped);
         }
         PathFilter pathFilter = isHudiParquetInputFormat(inputFormat) ? hoodiePathFilterLoadingCache.getUnchecked(configuration) : path1 -> true;
+        // Streaming aggregation works at the granularity of individual files
         // S3 Select pushdown works at the granularity of individual S3 objects,
         // Partial aggregation pushdown works at the granularity of individual files
         // therefore we must not split files when either is enabled.
         // Skip header / footer lines are not splittable except for a special case when skip.header.line.count=1
-        boolean splittable = !s3SelectPushdownEnabled && !partialAggregationsPushedDown && getFooterCount(schema) == 0 && getHeaderCount(schema) <= 1;
+        boolean splittable = isFileSplittable(session) &&
+                !isStreamingAggregationEnabled(session) &&
+                !s3SelectPushdownEnabled &&
+                !partialAggregationsPushedDown &&
+                getFooterCount(schema) == 0 && getHeaderCount(schema) <= 1;
 
         // Bucketed partitions are fully loaded immediately since all files must be loaded to determine the file to bucket mapping
         if (tableBucketInfo.isPresent()) {
@@ -299,22 +304,6 @@ public class StoragePartitionLoader
             }
         }
         return lastResult;
-    }
-
-    private static boolean isHudiParquetInputFormat(InputFormat<?, ?> inputFormat)
-    {
-        if (inputFormat instanceof HoodieParquetRealtimeInputFormat) {
-            return false;
-        }
-        return inputFormat instanceof HoodieParquetInputFormat;
-    }
-
-    private static boolean shouldUseFileSplitsFromInputFormat(InputFormat<?, ?> inputFormat)
-    {
-        return Arrays.stream(inputFormat.getClass().getAnnotations())
-                .map(Annotation::annotationType)
-                .map(Class::getSimpleName)
-                .anyMatch(name -> name.equals("UseFileSplitsFromInputFormat"));
     }
 
     private Iterator<InternalHiveSplit> createInternalHiveSplitIterator(Path path, ExtendedFileSystem fileSystem, InternalHiveSplitFactory splitFactory, boolean splittable, PathFilter pathFilter, Optional<Partition> partition)

@@ -20,6 +20,10 @@ import com.facebook.presto.common.Subfield;
 import com.facebook.presto.common.block.Block;
 import com.facebook.presto.common.block.BlockBuilder;
 import com.facebook.presto.common.io.OutputStreamDataSink;
+import com.facebook.presto.common.predicate.FilterFunction;
+import com.facebook.presto.common.predicate.TupleDomainFilter;
+import com.facebook.presto.common.predicate.TupleDomainFilter.BigintRange;
+import com.facebook.presto.common.predicate.TupleDomainFilter.DoubleRange;
 import com.facebook.presto.common.type.ArrayType;
 import com.facebook.presto.common.type.CharType;
 import com.facebook.presto.common.type.DecimalType;
@@ -40,8 +44,6 @@ import com.facebook.presto.common.type.VarcharType;
 import com.facebook.presto.metadata.FunctionAndTypeManager;
 import com.facebook.presto.orc.TrackingTupleDomainFilter.TestBigintRange;
 import com.facebook.presto.orc.TrackingTupleDomainFilter.TestDoubleRange;
-import com.facebook.presto.orc.TupleDomainFilter.BigintRange;
-import com.facebook.presto.orc.TupleDomainFilter.DoubleRange;
 import com.facebook.presto.orc.cache.OrcFileTailSource;
 import com.facebook.presto.orc.cache.StorageOrcFileTailSource;
 import com.facebook.presto.orc.metadata.CompressionKind;
@@ -132,6 +134,8 @@ import static com.facebook.hive.orc.OrcConf.ConfVars.HIVE_ORC_BUILD_STRIDE_DICTI
 import static com.facebook.hive.orc.OrcConf.ConfVars.HIVE_ORC_COMPRESSION;
 import static com.facebook.hive.orc.OrcConf.ConfVars.HIVE_ORC_DICTIONARY_ENCODING_INTERVAL;
 import static com.facebook.hive.orc.OrcConf.ConfVars.HIVE_ORC_ENTROPY_STRING_THRESHOLD;
+import static com.facebook.presto.common.predicate.TupleDomainFilter.IS_NOT_NULL;
+import static com.facebook.presto.common.predicate.TupleDomainFilter.IS_NULL;
 import static com.facebook.presto.common.type.BigintType.BIGINT;
 import static com.facebook.presto.common.type.BooleanType.BOOLEAN;
 import static com.facebook.presto.common.type.Chars.truncateToLengthAndTrimSpaces;
@@ -157,8 +161,6 @@ import static com.facebook.presto.orc.OrcTester.Format.ORC_11;
 import static com.facebook.presto.orc.OrcTester.Format.ORC_12;
 import static com.facebook.presto.orc.OrcWriteValidation.OrcWriteValidationMode.BOTH;
 import static com.facebook.presto.orc.TestingOrcPredicate.createOrcPredicate;
-import static com.facebook.presto.orc.TupleDomainFilter.IS_NOT_NULL;
-import static com.facebook.presto.orc.TupleDomainFilter.IS_NULL;
 import static com.facebook.presto.orc.metadata.CompressionKind.LZ4;
 import static com.facebook.presto.orc.metadata.CompressionKind.NONE;
 import static com.facebook.presto.orc.metadata.CompressionKind.SNAPPY;
@@ -897,7 +899,8 @@ public class OrcTester
                 includedColumns,
                 outputColumns,
                 false,
-                new TestingHiveOrcAggregatedMemoryContext())) {
+                new TestingHiveOrcAggregatedMemoryContext(),
+                false)) {
             assertEquals(recordReader.getReaderPosition(), 0);
             assertEquals(recordReader.getFilePosition(), 0);
             assertFileContentsPresto(types, recordReader, expectedValues, outputColumns);
@@ -1438,7 +1441,17 @@ public class OrcTester
     static OrcBatchRecordReader createCustomOrcRecordReader(TempFile tempFile, OrcEncoding orcEncoding, OrcPredicate predicate, List<Type> types, int initialBatchSize, boolean cacheable, boolean mapNullKeysEnabled)
             throws IOException
     {
-        return createCustomOrcRecordReader(tempFile, orcEncoding, predicate, types, initialBatchSize, new StorageOrcFileTailSource(), new StorageStripeMetadataSource(), cacheable, ImmutableMap.of(), mapNullKeysEnabled);
+        return createCustomOrcRecordReader(
+                tempFile,
+                orcEncoding,
+                predicate,
+                types,
+                initialBatchSize,
+                new StorageOrcFileTailSource(),
+                new StorageStripeMetadataSource(),
+                cacheable,
+                ImmutableMap.of(),
+                mapNullKeysEnabled);
     }
 
     static OrcBatchRecordReader createCustomOrcRecordReader(
@@ -1467,6 +1480,7 @@ public class OrcTester
                         MAX_BLOCK_SIZE,
                         false,
                         mapNullKeysEnabled,
+                        false,
                         false),
                 cacheable,
                 new DwrfEncryptionProvider(new UnsupportedEncryptionLibrary(), new TestingEncryptionLibrary()),
@@ -1502,6 +1516,7 @@ public class OrcTester
                         MAX_BLOCK_SIZE,
                         false,
                         mapNullKeysEnabled,
+                        false,
                         false),
                 false,
                 new DwrfEncryptionProvider(new UnsupportedEncryptionLibrary(), new TestingEncryptionLibrary()),
@@ -1634,7 +1649,8 @@ public class OrcTester
             OrcPredicate predicate,
             Type type,
             int initialBatchSize,
-            boolean mapNullKeysEnabled)
+            boolean mapNullKeysEnabled,
+            boolean appendRowNumber)
             throws IOException
     {
         return createCustomOrcSelectiveRecordReader(
@@ -1652,7 +1668,8 @@ public class OrcTester
                 ImmutableMap.of(0, type),
                 ImmutableList.of(0),
                 mapNullKeysEnabled,
-                new TestingHiveOrcAggregatedMemoryContext());
+                new TestingHiveOrcAggregatedMemoryContext(),
+                appendRowNumber);
     }
 
     public static OrcSelectiveRecordReader createCustomOrcSelectiveRecordReader(
@@ -1670,7 +1687,8 @@ public class OrcTester
             Map<Integer, Type> includedColumns,
             List<Integer> outputColumns,
             boolean mapNullKeysEnabled,
-            OrcAggregatedMemoryContext systemMemoryUsage)
+            OrcAggregatedMemoryContext systemMemoryUsage,
+            boolean appendRowNumber)
             throws IOException
     {
         OrcDataSource orcDataSource = new FileOrcDataSource(file, new DataSize(1, MEGABYTE), new DataSize(1, MEGABYTE), new DataSize(1, MEGABYTE), true);
@@ -1686,7 +1704,8 @@ public class OrcTester
                         MAX_BLOCK_SIZE,
                         false,
                         mapNullKeysEnabled,
-                        false),
+                        false,
+                        appendRowNumber),
                 false,
                 new DwrfEncryptionProvider(new UnsupportedEncryptionLibrary(), new TestingEncryptionLibrary()),
                 DwrfKeyProvider.of(intermediateEncryptionKeys),
