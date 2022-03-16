@@ -216,6 +216,10 @@ public class FeaturesConfig
 
     private boolean streamingForPartialAggregationEnabled;
 
+    private int maxStageCountForEagerScheduling = 25;
+
+    private double hyperloglogStandardErrorWarningThreshold = 0.004;
+
     public enum PartitioningPrecisionStrategy
     {
         // Let Presto decide when to repartition
@@ -1967,6 +1971,33 @@ public class FeaturesConfig
     public FeaturesConfig setStreamingForPartialAggregationEnabled(boolean streamingForPartialAggregationEnabled)
     {
         this.streamingForPartialAggregationEnabled = streamingForPartialAggregationEnabled;
+        return this;
+    }
+
+    public int getMaxStageCountForEagerScheduling()
+    {
+        return maxStageCountForEagerScheduling;
+    }
+
+    @Min(1)
+    @Config("execution-policy.max-stage-count-for-eager-scheduling")
+    @ConfigDescription("When execution policy is set to adaptive, this number determines when to switch to phased execution.")
+    public FeaturesConfig setMaxStageCountForEagerScheduling(int maxStageCountForEagerScheduling)
+    {
+        this.maxStageCountForEagerScheduling = maxStageCountForEagerScheduling;
+        return this;
+    }
+
+    public double getHyperloglogStandardErrorWarningThreshold()
+    {
+        return hyperloglogStandardErrorWarningThreshold;
+    }
+
+    @Config("hyperloglog-standard-error-warning-threshold")
+    @ConfigDescription("aggregation functions can produce low-precision results when the max standard error lower than this value.")
+    public FeaturesConfig setHyperloglogStandardErrorWarningThreshold(double hyperloglogStandardErrorWarningThreshold)
+    {
+        this.hyperloglogStandardErrorWarningThreshold = hyperloglogStandardErrorWarningThreshold;
         return this;
     }
 }

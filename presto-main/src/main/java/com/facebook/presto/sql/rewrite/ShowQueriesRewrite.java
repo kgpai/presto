@@ -107,6 +107,7 @@ import static com.facebook.presto.metadata.FunctionAndTypeManager.qualifyObjectN
 import static com.facebook.presto.metadata.MetadataListing.listCatalogs;
 import static com.facebook.presto.metadata.MetadataListing.listSchemas;
 import static com.facebook.presto.metadata.MetadataUtil.createCatalogSchemaName;
+import static com.facebook.presto.metadata.MetadataUtil.createQualifiedName;
 import static com.facebook.presto.metadata.MetadataUtil.createQualifiedObjectName;
 import static com.facebook.presto.metadata.SessionFunctionHandle.SESSION_NAMESPACE;
 import static com.facebook.presto.spi.StandardErrorCode.FUNCTION_NOT_FOUND;
@@ -461,7 +462,7 @@ final class ShowQueriesRewrite
                 }
 
                 Query query = parseView(viewDefinition.get().getOriginalSql(), objectName, node);
-                String sql = formatSql(new CreateView(getQualifiedName(node, objectName), query, false, Optional.empty()), Optional.of(parameters)).trim();
+                String sql = formatSql(new CreateView(createQualifiedName(objectName), query, false, Optional.empty()), Optional.of(parameters)).trim();
                 return singleValueQuery("Create View", sql);
             }
 
@@ -487,7 +488,7 @@ final class ShowQueriesRewrite
 
                 CreateMaterializedView createMaterializedView = new CreateMaterializedView(
                         Optional.empty(),
-                        getQualifiedName(node, objectName),
+                        createQualifiedName(objectName),
                         query,
                         false,
                         propertyNodes,
@@ -595,16 +596,6 @@ final class ShowQueriesRewrite
                     ordering(ascending("argument_types")));
         }
 
-        private QualifiedName getQualifiedName(ShowCreate node, QualifiedObjectName objectName)
-        {
-            List<Identifier> parts = node.getName().getOriginalParts();
-            Identifier tableName = parts.get(0);
-            Identifier schemaName = (parts.size() > 1) ? parts.get(1) : new Identifier(objectName.getSchemaName());
-            Identifier catalogName = (parts.size() > 2) ? parts.get(2) : new Identifier(objectName.getCatalogName());
-
-            return QualifiedName.of(ImmutableList.of(catalogName, schemaName, tableName));
-        }
-
         private List<Property> buildProperties(
                 Object objectName,
                 Optional<String> columnName,
@@ -622,7 +613,7 @@ final class ShowQueriesRewrite
                 String propertyName = propertyEntry.getKey();
                 Object value = propertyEntry.getValue();
                 if (value == null) {
-                    throw new PrestoException(errorCode, format("Property %s for %s cannot have a null value", propertyName, toQualifedName(objectName, columnName)));
+                    throw new PrestoException(errorCode, format("Property %s for %s cannot have a null value", propertyName, toQualifiedName(objectName, columnName)));
                 }
 
                 PropertyMetadata<?> property = allProperties.get(propertyName);
@@ -630,7 +621,7 @@ final class ShowQueriesRewrite
                     throw new PrestoException(errorCode, format(
                             "Property %s for %s should have value of type %s, not %s",
                             propertyName,
-                            toQualifedName(objectName, columnName),
+                            toQualifiedName(objectName, columnName),
                             property.getJavaType().getName(),
                             value.getClass().getName()));
                 }
@@ -644,7 +635,7 @@ final class ShowQueriesRewrite
                     .collect(toImmutableList());
         }
 
-        private static String toQualifedName(Object objectName, Optional<String> columnName)
+        private static String toQualifiedName(Object objectName, Optional<String> columnName)
         {
             return columnName.map(s -> format("column %s of table %s", s, objectName))
                     .orElseGet(() -> "table " + objectName);

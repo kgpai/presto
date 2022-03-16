@@ -60,7 +60,8 @@ import java.util.stream.IntStream;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_UNSUPPORTED_FORMAT;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_WRITER_OPEN_ERROR;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_WRITE_VALIDATION_FAILED;
-import static com.facebook.presto.hive.HiveSessionProperties.getDwrfWriterStripeCacheeMaxSize;
+import static com.facebook.presto.hive.HiveSessionProperties.getCompressionLevel;
+import static com.facebook.presto.hive.HiveSessionProperties.getDwrfWriterStripeCacheMaxSize;
 import static com.facebook.presto.hive.HiveSessionProperties.getOrcMaxBufferSize;
 import static com.facebook.presto.hive.HiveSessionProperties.getOrcMaxMergeDistance;
 import static com.facebook.presto.hive.HiveSessionProperties.getOrcOptimizedWriterMaxDictionaryMemory;
@@ -234,7 +235,8 @@ public class OrcFileWriterFactory
                             .withMaxStringStatisticsLimit(getOrcStringStatisticsLimit(session))
                             .withIgnoreDictionaryRowGroupSizes(isExecutionBasedMemoryAccountingEnabled(session))
                             .withDwrfStripeCacheEnabled(isDwrfWriterStripeCacheEnabled(session))
-                            .withDwrfStripeCacheMaxSize(getDwrfWriterStripeCacheeMaxSize(session))
+                            .withDwrfStripeCacheMaxSize(getDwrfWriterStripeCacheMaxSize(session))
+                            .withCompressionLevel(getCompressionLevel(session))
                             .build(),
                     fileInputColumnIndexes,
                     ImmutableMap.<String, String>builder()

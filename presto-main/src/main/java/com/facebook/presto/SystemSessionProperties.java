@@ -218,6 +218,8 @@ public final class SystemSessionProperties
     public static final String DISTRIBUTED_TRACING_MODE = "distributed_tracing_mode";
     public static final String VERBOSE_RUNTIME_STATS_ENABLED = "verbose_runtime_stats_enabled";
     public static final String STREAMING_FOR_PARTIAL_AGGREGATION_ENABLED = "streaming_for_partial_aggregation_enabled";
+    public static final String MAX_STAGE_COUNT_FOR_EAGER_SCHEDULING = "max_stage_count_for_eager_scheduling";
+    public static final String HYPERLOGLOG_STANDARD_ERROR_WARNING_THRESHOLD = "hyperloglog_standard_error_warning_threshold";
 
     //TODO: Prestissimo related session properties that are temporarily put here. They will be relocated in the future
     public static final String PRESTISSIMO_SIMPLIFIED_EXPRESSION_EVALUATION_ENABLED = "simplified_expression_evaluation_enabled";
@@ -565,7 +567,7 @@ public final class SystemSessionProperties
                         JoinReorderingStrategy::name),
                 new PropertyMetadata<>(
                         PARTIAL_MERGE_PUSHDOWN_STRATEGY,
-                        format("Experimental: Partial merge pushdown strategy to use. Optionas are %s",
+                        format("Experimental: Partial merge pushdown strategy to use. Options are %s",
                                 Stream.of(PartialMergePushdownStrategy.values())
                                         .map(PartialMergePushdownStrategy::name)
                                         .collect(joining(","))),
@@ -685,7 +687,7 @@ public final class SystemSessionProperties
                         false),
                 new PropertyMetadata<>(
                         AGGREGATION_OPERATOR_UNSPILL_MEMORY_LIMIT,
-                        "Experimental: How much memory can should be allocated per aggragation operator in unspilling process",
+                        "Experimental: How much memory can should be allocated per aggregation operator in unspilling process",
                         VARCHAR,
                         DataSize.class,
                         featuresConfig.getAggregationOperatorUnspillMemoryLimit(),
@@ -1229,6 +1231,16 @@ public final class SystemSessionProperties
                         HASH_BASED_DISTINCT_LIMIT_ENABLED,
                         "Hash based distinct limit enabled",
                         featuresConfig.isHashBasedDistinctLimitEnabled(),
+                        false),
+                integerProperty(
+                        MAX_STAGE_COUNT_FOR_EAGER_SCHEDULING,
+                        "Maximum stage count to use eager scheduling when using the adaptive scheduling policy",
+                        featuresConfig.getMaxStageCountForEagerScheduling(),
+                        false),
+                doubleProperty(
+                        HYPERLOGLOG_STANDARD_ERROR_WARNING_THRESHOLD,
+                        "Threshold for obtaining precise results from aggregation functions",
+                        featuresConfig.getHyperloglogStandardErrorWarningThreshold(),
                         false));
     }
 
@@ -2063,5 +2075,15 @@ public final class SystemSessionProperties
     public static String getHeapDumpFileDirectory(Session session)
     {
         return session.getSystemProperty(EXCEEDED_MEMORY_LIMIT_HEAP_DUMP_FILE_DIRECTORY, String.class);
+    }
+
+    public static int getMaxStageCountForEagerScheduling(Session session)
+    {
+        return session.getSystemProperty(MAX_STAGE_COUNT_FOR_EAGER_SCHEDULING, Integer.class);
+    }
+
+    public static double getHyperloglogStandardErrorWarningThreshold(Session session)
+    {
+        return session.getSystemProperty(HYPERLOGLOG_STANDARD_ERROR_WARNING_THRESHOLD, Double.class);
     }
 }
