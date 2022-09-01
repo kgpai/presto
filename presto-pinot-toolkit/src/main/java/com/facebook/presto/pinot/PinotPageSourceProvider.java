@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.pinot;
 
+import com.facebook.presto.pinot.auth.PinotBrokerAuthenticationProvider;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ConnectorId;
 import com.facebook.presto.spi.ConnectorPageSource;
@@ -23,6 +24,7 @@ import com.facebook.presto.spi.SplitContext;
 import com.facebook.presto.spi.connector.ConnectorPageSourceProvider;
 import com.facebook.presto.spi.connector.ConnectorTransactionHandle;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.annotations.VisibleForTesting;
 import org.apache.pinot.common.utils.grpc.GrpcQueryClient;
 import org.apache.pinot.connector.presto.PinotScatterGatherQueryClient;
 import org.apache.pinot.connector.presto.grpc.PinotStreamingQueryClient;
@@ -30,10 +32,14 @@ import org.apache.pinot.connector.presto.grpc.PinotStreamingQueryClient;
 import javax.inject.Inject;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static java.util.Objects.requireNonNull;
+import static org.apache.pinot.common.utils.grpc.GrpcQueryClient.Config.CONFIG_MAX_INBOUND_MESSAGE_BYTES_SIZE;
+import static org.apache.pinot.common.utils.grpc.GrpcQueryClient.Config.CONFIG_USE_PLAIN_TEXT;
 
 public class PinotPageSourceProvider
         implements ConnectorPageSourceProvider
@@ -44,13 +50,15 @@ public class PinotPageSourceProvider
     private final PinotStreamingQueryClient pinotStreamingQueryClient;
     private final PinotClusterInfoFetcher clusterInfoFetcher;
     private final ObjectMapper objectMapper;
+    private final PinotBrokerAuthenticationProvider brokerAuthenticationProvider;
 
     @Inject
     public PinotPageSourceProvider(
             ConnectorId connectorId,
             PinotConfig pinotConfig,
             PinotClusterInfoFetcher clusterInfoFetcher,
-            ObjectMapper objectMapper)
+            ObjectMapper objectMapper,
+            PinotBrokerAuthenticationProvider brokerAuthenticationProvider)
     {
         this.connectorId = requireNonNull(connectorId, "connectorId is null").toString();
         this.pinotConfig = requireNonNull(pinotConfig, "pinotConfig is null");
@@ -60,11 +68,10 @@ public class PinotPageSourceProvider
                 pinotConfig.getMinConnectionsPerServer(),
                 pinotConfig.getMaxBacklogPerServer(),
                 pinotConfig.getMaxConnectionsPerServer()));
-        this.pinotStreamingQueryClient = new PinotStreamingQueryClient(new GrpcQueryClient.Config(
-                pinotConfig.getStreamingServerGrpcMaxInboundMessageBytes(),
-                true));
+        this.pinotStreamingQueryClient = new PinotStreamingQueryClient(extractGrpcQueryClientConfig(pinotConfig));
         this.clusterInfoFetcher = requireNonNull(clusterInfoFetcher, "cluster info fetcher is null");
         this.objectMapper = requireNonNull(objectMapper, "object mapper is null");
+        this.brokerAuthenticationProvider = requireNonNull(brokerAuthenticationProvider, "broker authentication provider is null");
     }
 
     @Override
@@ -112,7 +119,8 @@ public class PinotPageSourceProvider
                             handles,
                             pinotSplit.getExpectedColumnHandles(),
                             clusterInfoFetcher,
-                            objectMapper);
+                            objectMapper,
+                            brokerAuthenticationProvider);
                     case PQL:
                         return new PinotBrokerPageSourcePql(
                             pinotConfig,
@@ -121,10 +129,39 @@ public class PinotPageSourceProvider
                             handles,
                             pinotSplit.getExpectedColumnHandles(),
                             clusterInfoFetcher,
-                            objectMapper);
+                            objectMapper,
+                            brokerAuthenticationProvider);
                 }
             default:
                 throw new UnsupportedOperationException("Unknown Pinot split type: " + pinotSplit.getSplitType());
+        }
+    }
+
+    @VisibleForTesting
+    static GrpcQueryClient.Config extractGrpcQueryClientConfig(PinotConfig config)
+    {
+        Map<String, Object> target = new HashMap<>();
+        target.put(CONFIG_USE_PLAIN_TEXT, !config.isUseSecureConnection());
+        target.put(CONFIG_MAX_INBOUND_MESSAGE_BYTES_SIZE, config.getStreamingServerGrpcMaxInboundMessageBytes());
+        if (config.isUseSecureConnection()) {
+            setOrRemoveProperty(target, "tls.keystore.path", config.getGrpcTlsKeyStorePath());
+            setOrRemoveProperty(target, "tls.keystore.password", config.getGrpcTlsKeyStorePassword());
+            setOrRemoveProperty(target, "tls.keystore.type", config.getGrpcTlsKeyStoreType());
+            setOrRemoveProperty(target, "tls.truststore.path", config.getGrpcTlsTrustStorePath());
+            setOrRemoveProperty(target, "tls.truststore.password", config.getGrpcTlsTrustStorePassword());
+            setOrRemoveProperty(target, "tls.truststore.type", config.getGrpcTlsTrustStoreType());
+        }
+        return new GrpcQueryClient.Config(target);
+    }
+    // The method is created because Pinot Config does not like null as value, if value is null, we should
+    // remove the key instead.
+    private static void setOrRemoveProperty(Map<String, Object> prop, String key, Object value)
+    {
+        if (value == null) {
+            prop.remove(key);
+        }
+        else {
+            prop.put(key, value);
         }
     }
 }

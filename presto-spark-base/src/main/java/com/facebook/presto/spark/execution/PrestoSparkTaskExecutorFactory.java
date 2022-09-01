@@ -385,8 +385,8 @@ public class PrestoSparkTaskExecutorFactory
 
         log.info(PlanPrinter.textPlanFragment(fragment, functionAndTypeManager, session, true));
 
-        DataSize maxUserMemory = new DataSize(min(nodeMemoryConfig.getMaxQueryMemoryPerNode().toBytes(), getQueryMaxMemoryPerNode(session).toBytes()), BYTE);
-        DataSize maxTotalMemory = new DataSize(min(nodeMemoryConfig.getMaxQueryTotalMemoryPerNode().toBytes(), getQueryMaxTotalMemoryPerNode(session).toBytes()), BYTE);
+        DataSize maxUserMemory = getQueryMaxMemoryPerNode(session);
+        DataSize maxTotalMemory = getQueryMaxTotalMemoryPerNode(session);
         DataSize maxBroadcastMemory = getSparkBroadcastJoinMaxMemoryOverride(session);
         if (maxBroadcastMemory == null) {
             maxBroadcastMemory = new DataSize(min(nodeMemoryConfig.getMaxQueryBroadcastMemory().toBytes(), getQueryMaxBroadcastMemory(session).toBytes()), BYTE);
@@ -475,7 +475,7 @@ public class PrestoSparkTaskExecutorFactory
                 if (totalReservedMemory > maxTotalMemory.toBytes() && !memoryRevokeRequestInProgress.get() && !isMemoryRevokePending(taskContext)) {
                     throw exceededLocalTotalMemoryLimit(
                             maxTotalMemory,
-                            queryContext.getAdditionalFailureInfo(totalReservedMemory, 0) +
+                            queryContext.getAdditionalFailureInfo(totalReservedMemory, 0, "test-operator") +
                                     format("Total reserved memory: %s, Total revocable memory: %s",
                                             succinctBytes(pool.getQueryMemoryReservation(queryId)),
                                             succinctBytes(pool.getQueryRevocableMemoryReservation(queryId))),
@@ -1082,6 +1082,7 @@ public class PrestoSparkTaskExecutorFactory
 
             long compressedBroadcastSizeInBytes = 0;
             long uncompressedBroadcastSizeInBytes = 0;
+            long deserializedBroadcastRetainedSizeInBytes = 0;
             int positionCount = 0;
             CRC32 checksum = new CRC32();
             TempStorageHandle tempStorageHandle;
@@ -1105,6 +1106,7 @@ public class PrestoSparkTaskExecutorFactory
                     bufferedBytes += writtenSize;
                     compressedBroadcastSizeInBytes += page.getSerializedPage().getSizeInBytes();
                     uncompressedBroadcastSizeInBytes += page.getSerializedPage().getUncompressedSizeInBytes();
+                    deserializedBroadcastRetainedSizeInBytes += page.getDeserializedRetainedSizeInBytes();
                     positionCount += page.getPositionCount();
                     Slice slice = page.getSerializedPage().getSlice();
                     checksum.update(slice.byteArray(), slice.byteArrayOffset(), slice.length());
@@ -1117,12 +1119,13 @@ public class PrestoSparkTaskExecutorFactory
                 }
 
                 tempStorageHandle = tempDataSink.commit();
-                log.info("Created broadcast spill file: " + tempStorageHandle.toString());
+                log.info("Created broadcast spill file: " + tempStorageHandle.toString() + " deserialized size: " + deserializedBroadcastRetainedSizeInBytes);
                 PrestoSparkStorageHandle prestoSparkStorageHandle =
                         new PrestoSparkStorageHandle(
                                 tempStorage.serializeHandle(tempStorageHandle),
                                 uncompressedBroadcastSizeInBytes,
                                 compressedBroadcastSizeInBytes,
+                                deserializedBroadcastRetainedSizeInBytes,
                                 checksum.getValue(),
                                 positionCount);
                 long end = System.currentTimeMillis();

@@ -16,6 +16,7 @@ package com.facebook.presto.pinot;
 import com.facebook.presto.common.PageBuilder;
 import com.facebook.presto.common.block.BlockBuilder;
 import com.facebook.presto.common.type.Type;
+import com.facebook.presto.pinot.auth.PinotBrokerAuthenticationProvider;
 import com.facebook.presto.pinot.query.PinotQueryGenerator.GeneratedPinotQuery;
 import com.facebook.presto.spi.ConnectorSession;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -35,7 +36,8 @@ public class PinotBrokerPageSourceSql
         extends PinotBrokerPageSourceBase
 {
     private static final String REQUEST_PAYLOAD_KEY = "sql";
-    private static final String QUERY_URL_TEMPLATE = "http://%s/query/sql";
+    private static final String QUERY_URL_TEMPLATE_PLAIN = "http://%s/query/sql";
+    private static final String QUERY_URL_TEMPLATE_SECURE = "https://%s/query/sql";
 
     private final GeneratedPinotQuery brokerSql;
     private final List<PinotColumnHandle> expectedHandles;
@@ -47,9 +49,10 @@ public class PinotBrokerPageSourceSql
             List<PinotColumnHandle> columnHandles,
             List<PinotColumnHandle> expectedHandles,
             PinotClusterInfoFetcher clusterInfoFetcher,
-            ObjectMapper objectMapper)
+            ObjectMapper objectMapper,
+            PinotBrokerAuthenticationProvider brokerAuthenticationProvider)
     {
-        super(pinotConfig, session, columnHandles, clusterInfoFetcher, objectMapper);
+        super(pinotConfig, session, columnHandles, clusterInfoFetcher, objectMapper, brokerAuthenticationProvider);
         this.expectedHandles = requireNonNull(expectedHandles, "expected handles is null");
         this.brokerSql = requireNonNull(brokerSql, "broker is null");
     }
@@ -63,7 +66,7 @@ public class PinotBrokerPageSourceSql
     @Override
     String getQueryUrlTemplate()
     {
-        return QUERY_URL_TEMPLATE;
+        return pinotConfig.isUseSecureConnection() ? QUERY_URL_TEMPLATE_SECURE : QUERY_URL_TEMPLATE_PLAIN;
     }
 
     @Override

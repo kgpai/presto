@@ -23,6 +23,7 @@ import com.facebook.presto.common.block.BlockEncodingManager;
 import com.facebook.presto.common.block.SortOrder;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.connector.ConnectorManager;
+import com.facebook.presto.connector.ConnectorTypeSerdeManager;
 import com.facebook.presto.connector.system.AnalyzePropertiesSystemTable;
 import com.facebook.presto.connector.system.CatalogSystemTable;
 import com.facebook.presto.connector.system.ColumnPropertiesSystemTable;
@@ -37,6 +38,7 @@ import com.facebook.presto.cost.CostCalculatorUsingExchanges;
 import com.facebook.presto.cost.CostCalculatorWithEstimatedExchanges;
 import com.facebook.presto.cost.CostComparator;
 import com.facebook.presto.cost.FilterStatsCalculator;
+import com.facebook.presto.cost.HistoryBasedPlanStatisticsManager;
 import com.facebook.presto.cost.ScalarStatsCalculator;
 import com.facebook.presto.cost.StatsCalculator;
 import com.facebook.presto.cost.StatsNormalizer;
@@ -72,6 +74,7 @@ import com.facebook.presto.execution.SetSessionTask;
 import com.facebook.presto.execution.StartTransactionTask;
 import com.facebook.presto.execution.TaskManagerConfig;
 import com.facebook.presto.execution.TaskSource;
+import com.facebook.presto.execution.TruncateTableTask;
 import com.facebook.presto.execution.resourceGroups.NoOpResourceGroupManager;
 import com.facebook.presto.execution.scheduler.LegacyNetworkTopology;
 import com.facebook.presto.execution.scheduler.NodeScheduler;
@@ -114,6 +117,7 @@ import com.facebook.presto.operator.StageExecutionDescriptor;
 import com.facebook.presto.operator.TableCommitContext;
 import com.facebook.presto.operator.TaskContext;
 import com.facebook.presto.operator.index.IndexJoinLookupStats;
+import com.facebook.presto.server.ConnectorMetadataUpdateHandleJsonSerde;
 import com.facebook.presto.server.PluginManager;
 import com.facebook.presto.server.PluginManagerConfig;
 import com.facebook.presto.server.SessionPropertyDefaults;
@@ -191,6 +195,7 @@ import com.facebook.presto.sql.tree.Rollback;
 import com.facebook.presto.sql.tree.SetSession;
 import com.facebook.presto.sql.tree.StartTransaction;
 import com.facebook.presto.sql.tree.Statement;
+import com.facebook.presto.sql.tree.TruncateTable;
 import com.facebook.presto.testing.PageConsumerOperator.PageConsumerOutputFactory;
 import com.facebook.presto.tracing.TracingConfig;
 import com.facebook.presto.transaction.InMemoryTransactionManager;
@@ -263,6 +268,7 @@ public class LocalQueryRunner
     private final ExecutorService notificationExecutor;
     private final ScheduledExecutorService yieldExecutor;
     private final FinalizerService finalizerService;
+    private final ObjectMapper objectMapper;
 
     private final SqlParser sqlParser;
     private final PlanFragmenter planFragmenter;
@@ -286,6 +292,7 @@ public class LocalQueryRunner
     private final NodePartitioningManager nodePartitioningManager;
     private final ConnectorPlanOptimizerManager planOptimizerManager;
     private final ConnectorMetadataUpdaterManager distributedMetadataManager;
+    private final ConnectorTypeSerdeManager connectorTypeSerdeManager;
     private final PageSinkManager pageSinkManager;
     private final TransactionManager transactionManager;
     private final FileSingleStreamSpillerFactory singleStreamSpillerFactory;
@@ -298,6 +305,7 @@ public class LocalQueryRunner
     private final JoinFilterFunctionCompiler joinFilterFunctionCompiler;
     private final JoinCompiler joinCompiler;
     private final ConnectorManager connectorManager;
+    private final HistoryBasedPlanStatisticsManager historyBasedPlanStatisticsManager;
     private final PluginManager pluginManager;
     private final ImmutableMap<Class<? extends Statement>, DataDefinitionTask<?>> dataDefinitionTask;
 
@@ -323,10 +331,15 @@ public class LocalQueryRunner
 
     public LocalQueryRunner(Session defaultSession, FeaturesConfig featuresConfig, NodeSpillConfig nodeSpillConfig, boolean withInitialTransaction, boolean alwaysRevokeMemory)
     {
-        this(defaultSession, featuresConfig, nodeSpillConfig, withInitialTransaction, alwaysRevokeMemory, 1);
+        this(defaultSession, featuresConfig, nodeSpillConfig, withInitialTransaction, alwaysRevokeMemory, 1, new ObjectMapper());
     }
 
-    private LocalQueryRunner(Session defaultSession, FeaturesConfig featuresConfig, NodeSpillConfig nodeSpillConfig, boolean withInitialTransaction, boolean alwaysRevokeMemory, int nodeCountForStats)
+    public LocalQueryRunner(Session defaultSession, FeaturesConfig featuresConfig, NodeSpillConfig nodeSpillConfig, boolean withInitialTransaction, boolean alwaysRevokeMemory, ObjectMapper objectMapper)
+    {
+        this(defaultSession, featuresConfig, nodeSpillConfig, withInitialTransaction, alwaysRevokeMemory, 1, objectMapper);
+    }
+
+    private LocalQueryRunner(Session defaultSession, FeaturesConfig featuresConfig, NodeSpillConfig nodeSpillConfig, boolean withInitialTransaction, boolean alwaysRevokeMemory, int nodeCountForStats, ObjectMapper objectMapper)
     {
         requireNonNull(defaultSession, "defaultSession is null");
         checkArgument(!defaultSession.getTransactionId().isPresent() || !withInitialTransaction, "Already in transaction");
@@ -337,6 +350,7 @@ public class LocalQueryRunner
         this.yieldExecutor = newScheduledThreadPool(2, daemonThreadsNamed("local-query-runner-scheduler-%s"));
         this.finalizerService = new FinalizerService();
         finalizerService.start();
+        this.objectMapper = requireNonNull(objectMapper, "objectMapper is null");
 
         this.sqlParser = new SqlParser();
         this.nodeManager = new InMemoryNodeManager();
@@ -363,6 +377,7 @@ public class LocalQueryRunner
         this.nodePartitioningManager = new NodePartitioningManager(nodeScheduler, partitioningProviderManager, new NodeSelectionStats());
         this.planOptimizerManager = new ConnectorPlanOptimizerManager();
         this.distributedMetadataManager = new ConnectorMetadataUpdaterManager();
+        this.connectorTypeSerdeManager = new ConnectorTypeSerdeManager(new ConnectorMetadataUpdateHandleJsonSerde());
 
         this.blockEncodingManager = new BlockEncodingManager();
         featuresConfig.setIgnoreStatsCalculatorFailures(false);
@@ -395,7 +410,8 @@ public class LocalQueryRunner
         this.statsNormalizer = new StatsNormalizer();
         this.scalarStatsCalculator = new ScalarStatsCalculator(metadata);
         this.filterStatsCalculator = new FilterStatsCalculator(metadata, scalarStatsCalculator, statsNormalizer);
-        this.statsCalculator = createNewStatsCalculator(metadata, scalarStatsCalculator, statsNormalizer, filterStatsCalculator);
+        this.historyBasedPlanStatisticsManager = new HistoryBasedPlanStatisticsManager(objectMapper, new SessionPropertyManager());
+        this.statsCalculator = createNewStatsCalculator(metadata, scalarStatsCalculator, statsNormalizer, filterStatsCalculator, historyBasedPlanStatisticsManager);
         this.taskCountEstimator = new TaskCountEstimator(() -> nodeCountForStats);
         this.costCalculator = new CostCalculatorUsingExchanges(taskCountEstimator);
         this.estimatedExchangesCostCalculator = new CostCalculatorWithEstimatedExchanges(costCalculator, taskCountEstimator);
@@ -417,6 +433,7 @@ public class LocalQueryRunner
                 partitioningProviderManager,
                 planOptimizerManager,
                 distributedMetadataManager,
+                connectorTypeSerdeManager,
                 pageSinkManager,
                 new HandleResolver(),
                 nodeManager,
@@ -455,7 +472,8 @@ public class LocalQueryRunner
                 new QueryPrerequisitesManager(),
                 new SessionPropertyDefaults(nodeInfo),
                 new ThrowingNodeTtlFetcherManager(),
-                new ThrowingClusterTtlProviderManager());
+                new ThrowingClusterTtlProviderManager(),
+                historyBasedPlanStatisticsManager);
 
         connectorManager.addConnectorFactory(globalSystemConnectorFactory);
         connectorManager.createConnection(GlobalSystemConnector.NAME, GlobalSystemConnector.NAME, ImmutableMap.of());
@@ -487,7 +505,8 @@ public class LocalQueryRunner
                 metadata.getSessionPropertyManager(),
                 defaultSession.getPreparedStatements(),
                 defaultSession.getSessionFunctions(),
-                defaultSession.getTracer());
+                defaultSession.getTracer(),
+                defaultSession.getWarningCollector());
 
         dataDefinitionTask = ImmutableMap.<Class<? extends Statement>, DataDefinitionTask<?>>builder()
                 .put(CreateTable.class, new CreateTableTask())
@@ -499,6 +518,7 @@ public class LocalQueryRunner
                 .put(DropFunction.class, new DropFunctionTask(sqlParser))
                 .put(DropTable.class, new DropTableTask())
                 .put(DropView.class, new DropViewTask())
+                .put(TruncateTable.class, new TruncateTableTask())
                 .put(DropMaterializedView.class, new DropMaterializedViewTask())
                 .put(RenameColumn.class, new RenameColumnTask())
                 .put(RenameTable.class, new RenameTableTask())
@@ -526,7 +546,7 @@ public class LocalQueryRunner
 
     public static LocalQueryRunner queryRunnerWithFakeNodeCountForStats(Session defaultSession, int nodeCount)
     {
-        return new LocalQueryRunner(defaultSession, new FeaturesConfig(), new NodeSpillConfig(), false, false, nodeCount);
+        return new LocalQueryRunner(defaultSession, new FeaturesConfig(), new NodeSpillConfig(), false, false, nodeCount, new ObjectMapper());
     }
 
     @Override
@@ -843,7 +863,7 @@ public class LocalQueryRunner
                 jsonCodec(TableCommitContext.class),
                 new RowExpressionDeterminismEvaluator(metadata),
                 new NoOpFragmentResultCacheManager(),
-                new ObjectMapper(),
+                objectMapper,
                 standaloneSpillerFactory);
 
         // plan query

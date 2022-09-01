@@ -22,7 +22,9 @@ import com.facebook.presto.common.type.RowType;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.spi.ColumnHandle;
+import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.TableHandle;
+import com.facebook.presto.spi.constraints.TableConstraint;
 import com.facebook.presto.spi.plan.AggregationNode;
 import com.facebook.presto.spi.plan.Assignments;
 import com.facebook.presto.spi.plan.ExceptNode;
@@ -67,6 +69,7 @@ import com.facebook.presto.sql.tree.Join;
 import com.facebook.presto.sql.tree.JoinUsing;
 import com.facebook.presto.sql.tree.LambdaArgumentDeclaration;
 import com.facebook.presto.sql.tree.Lateral;
+import com.facebook.presto.sql.tree.Node;
 import com.facebook.presto.sql.tree.NodeRef;
 import com.facebook.presto.sql.tree.QualifiedName;
 import com.facebook.presto.sql.tree.Query;
@@ -88,6 +91,8 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.ListMultimap;
 import com.google.common.collect.UnmodifiableIterator;
 
+import javax.annotation.Nullable;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -97,7 +102,9 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static com.facebook.presto.SystemSessionProperties.getQueryAnalyzerTimeout;
 import static com.facebook.presto.common.type.TypeUtils.isEnumType;
+import static com.facebook.presto.spi.StandardErrorCode.QUERY_PLANNING_TIMEOUT;
 import static com.facebook.presto.spi.plan.AggregationNode.singleGroupingSet;
 import static com.facebook.presto.spi.plan.ProjectNode.Locality.LOCAL;
 import static com.facebook.presto.sql.analyzer.ExpressionTreeUtils.createSymbolReference;
@@ -151,6 +158,14 @@ class RelationPlanner
     }
 
     @Override
+    public RelationPlan process(Node node, @Nullable Void context)
+    {
+        // Check if relation planner timeout
+        checkInterruption();
+        return super.process(node, context);
+    }
+
+    @Override
     protected RelationPlan visitTable(Table node, Void context)
     {
         Query namedQuery = analysis.getNamedQuery(node);
@@ -177,7 +192,9 @@ class RelationPlanner
         }
 
         List<VariableReferenceExpression> outputVariables = outputVariablesBuilder.build();
-        PlanNode root = new TableScanNode(getSourceLocation(node.getLocation()), idAllocator.getNextId(), handle, outputVariables, columns.build(), TupleDomain.all(), TupleDomain.all());
+        List<TableConstraint<ColumnHandle>> tableConstraints = metadata.getTableMetadata(session, handle).getMetadata().getTableConstraints();
+        PlanNode root = new TableScanNode(getSourceLocation(node.getLocation()), idAllocator.getNextId(), handle, outputVariables, columns.build(), tableConstraints, TupleDomain.all(), TupleDomain.all());
+
         return new RelationPlan(root, scope, outputVariables);
     }
 
@@ -696,7 +713,7 @@ class RelationPlanner
             rowsBuilder.add(values.build());
         }
 
-        ValuesNode valuesNode = new ValuesNode(getSourceLocation(node), idAllocator.getNextId(), outputVariablesBuilder.build(), rowsBuilder.build());
+        ValuesNode valuesNode = new ValuesNode(getSourceLocation(node), idAllocator.getNextId(), outputVariablesBuilder.build(), rowsBuilder.build(), Optional.empty());
         return new RelationPlan(valuesNode, scope, outputVariablesBuilder.build());
     }
 
@@ -770,7 +787,8 @@ class RelationPlanner
                 getSourceLocation(node),
                 idAllocator.getNextId(),
                 argumentVariables.build(),
-                ImmutableList.of(values.build()));
+                ImmutableList.of(values.build()),
+                Optional.empty());
 
         UnnestNode unnestNode = new UnnestNode(getSourceLocation(node), idAllocator.getNextId(), valuesNode, ImmutableList.of(), unnestVariables.build(), ordinalityVariable);
         return new RelationPlan(unnestNode, scope, unnestedVariables);
@@ -908,6 +926,13 @@ class RelationPlanner
         }
 
         return new SetOperationPlan(sources.build(), variableMapping.build());
+    }
+
+    private void checkInterruption()
+    {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new PrestoException(QUERY_PLANNING_TIMEOUT, String.format("The query planner exceeded the timeout of %s.", getQueryAnalyzerTimeout(session).toString()));
+        }
     }
 
     private PlanBuilder initializePlanBuilder(RelationPlan relationPlan)

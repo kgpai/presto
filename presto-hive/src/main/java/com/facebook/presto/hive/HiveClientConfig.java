@@ -17,6 +17,7 @@ import com.facebook.airlift.configuration.Config;
 import com.facebook.airlift.configuration.ConfigDescription;
 import com.facebook.airlift.configuration.DefunctConfig;
 import com.facebook.airlift.configuration.LegacyConfig;
+import com.facebook.drift.transport.netty.codec.Protocol;
 import com.facebook.presto.hive.s3.S3FileSystemType;
 import com.facebook.presto.orc.OrcWriteValidation.OrcWriteValidationMode;
 import com.facebook.presto.spi.schedule.NodeSelectionStrategy;
@@ -40,9 +41,17 @@ import java.util.TimeZone;
 import java.util.concurrent.TimeUnit;
 
 import static com.facebook.presto.hive.BucketFunctionType.HIVE_COMPATIBLE;
+import static com.facebook.presto.hive.HiveClientConfig.InsertExistingPartitionsBehavior.APPEND;
+import static com.facebook.presto.hive.HiveClientConfig.InsertExistingPartitionsBehavior.ERROR;
+import static com.facebook.presto.hive.HiveClientConfig.InsertExistingPartitionsBehavior.OVERWRITE;
+import static com.facebook.presto.hive.HiveSessionProperties.INSERT_EXISTING_PARTITIONS_BEHAVIOR;
 import static com.facebook.presto.hive.HiveStorageFormat.ORC;
 import static com.facebook.presto.spi.schedule.NodeSelectionStrategy.NO_PREFERENCE;
+import static com.google.common.base.Preconditions.checkArgument;
+import static io.airlift.units.DataSize.Unit.BYTE;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
+import static java.lang.String.format;
+import static java.util.Locale.ENGLISH;
 
 @DefunctConfig({
         "hive.file-system-cache-ttl",
@@ -93,6 +102,7 @@ public class HiveClientConfig
     private boolean createEmptyBucketFiles = true;
     private boolean insertOverwriteImmutablePartitions;
     private boolean failFastOnInsertIntoImmutablePartitionsEnabled = true;
+    private InsertExistingPartitionsBehavior insertExistingPartitionsBehavior;
     private int maxPartitionsPerWriter = 100;
     private int maxOpenSortFiles = 50;
     private int writeValidationThreads = 16;
@@ -122,7 +132,6 @@ public class HiveClientConfig
     private boolean rcfileOptimizedWriterEnabled = true;
     private boolean rcfileWriterValidate;
 
-    private HiveMetastoreAuthenticationType hiveMetastoreAuthenticationType = HiveMetastoreAuthenticationType.NONE;
     private HdfsAuthenticationType hdfsAuthenticationType = HdfsAuthenticationType.NONE;
     private boolean hdfsImpersonationEnabled;
     private boolean hdfsWireEncryptionEnabled;
@@ -155,7 +164,7 @@ public class HiveClientConfig
 
     private boolean s3SelectPushdownEnabled;
     private int s3SelectPushdownMaxConnections = 500;
-    private boolean streamingAggregationEnabled;
+    private boolean orderBasedExecutionEnabled;
 
     private boolean isTemporaryStagingDirectoryEnabled = true;
     private String temporaryStagingDirectoryPath = "/tmp/presto-${USER}";
@@ -209,6 +218,12 @@ public class HiveClientConfig
 
     private boolean columnIndexFilterEnabled;
     private boolean fileSplittable = true;
+    private Protocol thriftProtocol = Protocol.BINARY;
+    private DataSize thriftBufferSize = new DataSize(128, BYTE);
+
+    private boolean copyOnFirstWriteConfigurationEnabled = true;
+
+    private boolean partitionFilteringFromMetastoreEnabled = true;
 
     @Min(0)
     public int getMaxInitialSplits()
@@ -591,16 +606,53 @@ public class HiveClientConfig
         return this;
     }
 
+    @Deprecated
     public boolean isInsertOverwriteImmutablePartitionEnabled()
     {
         return insertOverwriteImmutablePartitions;
     }
 
+    @Deprecated
     @Config("hive.insert-overwrite-immutable-partitions-enabled")
     @ConfigDescription("When enabled, insertion query will overwrite existing partitions when partitions are immutable. This config only takes effect with hive.immutable-partitions set to true")
     public HiveClientConfig setInsertOverwriteImmutablePartitionEnabled(boolean insertOverwriteImmutablePartitions)
     {
         this.insertOverwriteImmutablePartitions = insertOverwriteImmutablePartitions;
+        return this;
+    }
+
+    public enum InsertExistingPartitionsBehavior
+    {
+        ERROR,
+        APPEND,
+        OVERWRITE,
+        /**/;
+
+        public static InsertExistingPartitionsBehavior valueOf(String value, boolean immutablePartition)
+        {
+            InsertExistingPartitionsBehavior enumValue = valueOf(value.toUpperCase(ENGLISH));
+            if (immutablePartition) {
+                checkArgument(enumValue != APPEND, format("Presto is configured to treat Hive partitions as immutable. %s is not allowed to be set to %s", INSERT_EXISTING_PARTITIONS_BEHAVIOR, APPEND));
+            }
+
+            return enumValue;
+        }
+    }
+
+    public InsertExistingPartitionsBehavior getInsertExistingPartitionsBehavior()
+    {
+        if (insertExistingPartitionsBehavior != null) {
+            return insertExistingPartitionsBehavior;
+        }
+
+        return immutablePartitions ? (isInsertOverwriteImmutablePartitionEnabled() ? OVERWRITE : ERROR) : APPEND;
+    }
+
+    @Config("hive.insert-existing-partitions-behavior")
+    @ConfigDescription("Default value for insert existing partitions behavior")
+    public HiveClientConfig setInsertExistingPartitionsBehavior(InsertExistingPartitionsBehavior insertExistingPartitionsBehavior)
+    {
+        this.insertExistingPartitionsBehavior = insertExistingPartitionsBehavior;
         return this;
     }
 
@@ -1017,26 +1069,6 @@ public class HiveClientConfig
         return this;
     }
 
-    public enum HiveMetastoreAuthenticationType
-    {
-        NONE,
-        KERBEROS
-    }
-
-    @NotNull
-    public HiveMetastoreAuthenticationType getHiveMetastoreAuthenticationType()
-    {
-        return hiveMetastoreAuthenticationType;
-    }
-
-    @Config("hive.metastore.authentication.type")
-    @ConfigDescription("Hive Metastore authentication type")
-    public HiveClientConfig setHiveMetastoreAuthenticationType(HiveMetastoreAuthenticationType hiveMetastoreAuthenticationType)
-    {
-        this.hiveMetastoreAuthenticationType = hiveMetastoreAuthenticationType;
-        return this;
-    }
-
     public enum HdfsAuthenticationType
     {
         NONE,
@@ -1358,16 +1390,17 @@ public class HiveClientConfig
         return this;
     }
 
-    public boolean isStreamingAggregationEnabled()
+    public boolean isOrderBasedExecutionEnabled()
     {
-        return streamingAggregationEnabled;
+        return orderBasedExecutionEnabled;
     }
 
-    @Config("hive.streaming-aggregation-enabled")
-    @ConfigDescription("Enable streaming aggregation execution")
-    public HiveClientConfig setStreamingAggregationEnabled(boolean streamingAggregationEnabled)
+    @Config("hive.order-based-execution-enabled")
+    @ConfigDescription("Enable order-based execution. When it's enabled, hive files become non-splittable and the table ordering properties would be exposed to plan optimizer " +
+            "for features like streaming aggregation and merge join")
+    public HiveClientConfig setOrderBasedExecutionEnabled(boolean orderBasedExecutionEnabled)
     {
-        this.streamingAggregationEnabled = streamingAggregationEnabled;
+        this.orderBasedExecutionEnabled = orderBasedExecutionEnabled;
         return this;
     }
 
@@ -1799,5 +1832,57 @@ public class HiveClientConfig
     public boolean isHudiMetadataEnabled()
     {
         return this.hudiMetadataEnabled;
+    }
+
+    public Protocol getThriftProtocol()
+    {
+        return thriftProtocol;
+    }
+
+    @Config("hive.internal-communication.thrift-transport-protocol")
+    @ConfigDescription("Thrift encoding type for internal communication")
+    public HiveClientConfig setThriftProtocol(Protocol thriftProtocol)
+    {
+        this.thriftProtocol = thriftProtocol;
+        return this;
+    }
+
+    public DataSize getThriftBufferSize()
+    {
+        return thriftBufferSize;
+    }
+
+    @Config("hive.internal-communication.thrift-transport-buffer-size")
+    @ConfigDescription("Thrift buffer size for internal communication")
+    public HiveClientConfig setThriftBufferSize(DataSize thriftBufferSize)
+    {
+        this.thriftBufferSize = thriftBufferSize;
+        return this;
+    }
+
+    @Config("hive.copy-on-first-write-configuration-enabled")
+    @ConfigDescription("Optimize the number of configuration copies by enabling copy-on-write technique")
+    public HiveClientConfig setCopyOnFirstWriteConfigurationEnabled(boolean copyOnFirstWriteConfigurationEnabled)
+    {
+        this.copyOnFirstWriteConfigurationEnabled = copyOnFirstWriteConfigurationEnabled;
+        return this;
+    }
+
+    public boolean isCopyOnFirstWriteConfigurationEnabled()
+    {
+        return copyOnFirstWriteConfigurationEnabled;
+    }
+
+    public boolean isPartitionFilteringFromMetastoreEnabled()
+    {
+        return partitionFilteringFromMetastoreEnabled;
+    }
+
+    @Config("hive.partition-filtering-from-metastore-enabled")
+    @ConfigDescription("When enabled attempts to retrieve partition metadata only for partitions that satisfy the query predicates")
+    public HiveClientConfig setPartitionFilteringFromMetastoreEnabled(boolean partitionFilteringFromMetastoreEnabled)
+    {
+        this.partitionFilteringFromMetastoreEnabled = partitionFilteringFromMetastoreEnabled;
+        return this;
     }
 }

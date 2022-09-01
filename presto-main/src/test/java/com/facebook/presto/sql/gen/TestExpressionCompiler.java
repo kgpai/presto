@@ -805,14 +805,13 @@ public class TestExpressionCompiler
             assertExecute(generateExpression("cast(%s as varchar)", value), VARCHAR, value == null ? null : String.valueOf(value));
         }
 
-        DecimalFormat doubleFormat = new DecimalFormat("0.0###################E0");
         for (Double value : doubleLefts) {
             assertExecute(generateExpression("cast(%s as boolean)", value), BOOLEAN, value == null ? null : (value != 0.0 ? true : false));
             if (value == null || (value >= Long.MIN_VALUE && value < Long.MAX_VALUE)) {
                 assertExecute(generateExpression("cast(%s as bigint)", value), BIGINT, value == null ? null : value.longValue());
             }
             assertExecute(generateExpression("cast(%s as double)", value), DOUBLE, value == null ? null : value);
-            assertExecute(generateExpression("cast(%s as varchar)", value), VARCHAR, value == null ? null : doubleFormat.format(value));
+            assertExecute(generateExpression("cast(%s as varchar)", value), VARCHAR, value == null ? null : String.valueOf(value));
         }
 
         assertExecute("cast('true' as boolean)", BOOLEAN, true);
@@ -1435,21 +1434,22 @@ public class TestExpressionCompiler
     public void testFunctionCallJson()
             throws Exception
     {
+        ConnectorSession session = TEST_SESSION.toConnectorSession();
         for (String value : jsonValues) {
             for (String pattern : jsonPatterns) {
                 assertExecute(generateExpression("json_extract(%s, %s)", value, pattern),
                         JSON,
-                        value == null || pattern == null ? null : JsonFunctions.jsonExtract(utf8Slice(value), new JsonPath(pattern)));
+                        value == null || pattern == null ? null : JsonFunctions.jsonExtract(utf8Slice(value), JsonPath.build(pattern)));
                 assertExecute(generateExpression("json_extract_scalar(%s, %s)", value, pattern),
                         value == null ? createUnboundedVarcharType() : createVarcharType(value.length()),
-                        value == null || pattern == null ? null : JsonFunctions.jsonExtractScalar(utf8Slice(value), new JsonPath(pattern)));
+                        value == null || pattern == null ? null : JsonFunctions.jsonExtractScalar(utf8Slice(value), JsonPath.build(pattern)));
 
                 assertExecute(generateExpression("json_extract(%s, %s || '')", value, pattern),
                         JSON,
-                        value == null || pattern == null ? null : JsonFunctions.jsonExtract(utf8Slice(value), new JsonPath(pattern)));
+                        value == null || pattern == null ? null : JsonFunctions.jsonExtract(utf8Slice(value), JsonPath.build(pattern)));
                 assertExecute(generateExpression("json_extract_scalar(%s, %s || '')", value, pattern),
                         value == null ? createUnboundedVarcharType() : createVarcharType(value.length()),
-                        value == null || pattern == null ? null : JsonFunctions.jsonExtractScalar(utf8Slice(value), new JsonPath(pattern)));
+                        value == null || pattern == null ? null : JsonFunctions.jsonExtractScalar(utf8Slice(value), JsonPath.build(pattern)));
             }
         }
 

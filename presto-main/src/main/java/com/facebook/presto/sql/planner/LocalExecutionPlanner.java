@@ -109,8 +109,7 @@ import com.facebook.presto.operator.ValuesOperator.ValuesOperatorFactory;
 import com.facebook.presto.operator.WindowFunctionDefinition;
 import com.facebook.presto.operator.WindowOperator.WindowOperatorFactory;
 import com.facebook.presto.operator.aggregation.AccumulatorFactory;
-import com.facebook.presto.operator.aggregation.InternalAggregationFunction;
-import com.facebook.presto.operator.aggregation.LambdaProvider;
+import com.facebook.presto.operator.aggregation.BuiltInAggregationFunctionImplementation;
 import com.facebook.presto.operator.exchange.LocalExchange.LocalExchangeFactory;
 import com.facebook.presto.operator.exchange.LocalExchangeSinkOperator.LocalExchangeSinkOperatorFactory;
 import com.facebook.presto.operator.exchange.LocalExchangeSourceOperator.LocalExchangeSourceOperatorFactory;
@@ -135,8 +134,10 @@ import com.facebook.presto.spi.RecordSet;
 import com.facebook.presto.spi.TableHandle;
 import com.facebook.presto.spi.function.FunctionHandle;
 import com.facebook.presto.spi.function.FunctionMetadata;
+import com.facebook.presto.spi.function.JavaAggregationFunctionImplementation;
 import com.facebook.presto.spi.function.SqlFunctionId;
 import com.facebook.presto.spi.function.SqlInvokedFunction;
+import com.facebook.presto.spi.function.aggregation.LambdaProvider;
 import com.facebook.presto.spi.plan.AggregationNode;
 import com.facebook.presto.spi.plan.AggregationNode.Aggregation;
 import com.facebook.presto.spi.plan.AggregationNode.Step;
@@ -264,6 +265,7 @@ import static com.facebook.presto.SystemSessionProperties.isOptimizeCommonSubExp
 import static com.facebook.presto.SystemSessionProperties.isOptimizedRepartitioningEnabled;
 import static com.facebook.presto.SystemSessionProperties.isOrderByAggregationSpillEnabled;
 import static com.facebook.presto.SystemSessionProperties.isOrderBySpillEnabled;
+import static com.facebook.presto.SystemSessionProperties.isQuickDistinctLimitEnabled;
 import static com.facebook.presto.SystemSessionProperties.isSpillEnabled;
 import static com.facebook.presto.SystemSessionProperties.isWindowSpillEnabled;
 import static com.facebook.presto.common.type.BigintType.BIGINT;
@@ -289,6 +291,7 @@ import static com.facebook.presto.operator.TableWriterUtils.FRAGMENT_CHANNEL;
 import static com.facebook.presto.operator.TableWriterUtils.ROW_COUNT_CHANNEL;
 import static com.facebook.presto.operator.TableWriterUtils.STATS_START_CHANNEL;
 import static com.facebook.presto.operator.WindowFunctionDefinition.window;
+import static com.facebook.presto.operator.aggregation.GenericAccumulatorFactory.generateAccumulatorFactory;
 import static com.facebook.presto.operator.unnest.UnnestOperator.UnnestOperatorFactory;
 import static com.facebook.presto.spi.StandardErrorCode.COMPILER_ERROR;
 import static com.facebook.presto.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
@@ -1312,6 +1315,16 @@ public class LocalExecutionPlanner
             return visitScanFilterAndProject(context, node.getId(), sourceNode, filterExpression, node.getAssignments(), node.getOutputVariables(), node.getLocality());
         }
 
+        private int getFilterProjectMinRowCount(PlanNode projectSource)
+        {
+            // For final DistinctLimit, this project simply drops the hash variable so for better user experience, we set the limit to 1 so that results are shown quicker
+            if (isQuickDistinctLimitEnabled(session) && projectSource instanceof DistinctLimitNode && !((DistinctLimitNode) projectSource).isPartial()) {
+                return 1;
+            }
+
+            return getFilterAndProjectMinOutputPageRowCount(session);
+        }
+
         // TODO: This should be refactored, so that there's an optimizer that merges scan-filter-project into a single PlanNode
         private PhysicalOperation visitScanFilterAndProject(
                 LocalExecutionPlanContext context,
@@ -1444,7 +1457,7 @@ public class LocalExecutionPlanner
                             pageProcessor,
                             projections.stream().map(RowExpression::getType).collect(toImmutableList()),
                             getFilterAndProjectMinOutputPageSize(session),
-                            getFilterAndProjectMinOutputPageRowCount(session));
+                            getFilterProjectMinRowCount(sourceNode));
 
                     return new PhysicalOperation(operatorFactory, outputMappings, context, source);
                 }
@@ -2454,6 +2467,7 @@ public class LocalExecutionPlanner
             int buildChannel = buildSource.getLayout().get(node.getFilteringSourceJoinVariable());
 
             Optional<Integer> buildHashChannel = node.getFilteringSourceHashVariable().map(variableChannelGetter(buildSource));
+            Optional<Integer> probeHashChannel = node.getSourceHashVariable().map(variableChannelGetter(probeSource));
 
             SetBuilderOperatorFactory setBuilderOperatorFactory = new SetBuilderOperatorFactory(
                     buildContext.getNextOperatorId(),
@@ -2489,7 +2503,7 @@ public class LocalExecutionPlanner
                     .put(node.getSemiJoinOutput(), probeSource.getLayout().size())
                     .build();
 
-            HashSemiJoinOperatorFactory operator = new HashSemiJoinOperatorFactory(context.getNextOperatorId(), node.getId(), setProvider, probeSource.getTypes(), probeChannel);
+            HashSemiJoinOperatorFactory operator = new HashSemiJoinOperatorFactory(context.getNextOperatorId(), node.getId(), setProvider, probeSource.getTypes(), probeChannel, probeHashChannel);
             return new PhysicalOperation(operator, outputMappings, context, probeSource);
         }
 
@@ -2530,6 +2544,7 @@ public class LocalExecutionPlanner
                         aggregation.getAggregations(),
                         ImmutableSet.of(),
                         groupingVariables,
+                        ImmutableList.of(),
                         PARTIAL,
                         Optional.empty(),
                         Optional.empty(),
@@ -2635,6 +2650,7 @@ public class LocalExecutionPlanner
                         aggregation.getAggregations(),
                         ImmutableSet.of(),
                         groupingVariables,
+                        ImmutableList.of(),
                         INTERMEDIATE,
                         Optional.empty(),
                         Optional.empty(),
@@ -2689,6 +2705,7 @@ public class LocalExecutionPlanner
                         aggregation.getAggregations(),
                         ImmutableSet.of(),
                         groupingVariables,
+                        ImmutableList.of(),
                         FINAL,
                         Optional.empty(),
                         Optional.empty(),
@@ -2957,7 +2974,7 @@ public class LocalExecutionPlanner
                 boolean spillEnabled)
         {
             FunctionAndTypeManager functionAndTypeManager = metadata.getFunctionAndTypeManager();
-            InternalAggregationFunction internalAggregationFunction = functionAndTypeManager.getAggregateFunctionImplementation(aggregation.getFunctionHandle());
+            JavaAggregationFunctionImplementation javaAggregateFunctionImplementation = functionAndTypeManager.getJavaAggregateFunctionImplementation(aggregation.getFunctionHandle());
 
             List<Integer> valueChannels = new ArrayList<>();
             for (RowExpression argument : aggregation.getArguments()) {
@@ -2972,8 +2989,10 @@ public class LocalExecutionPlanner
                     .filter(LambdaDefinitionExpression.class::isInstance)
                     .map(LambdaDefinitionExpression.class::cast)
                     .collect(toImmutableList());
+            checkState(lambdas.isEmpty() || javaAggregateFunctionImplementation instanceof BuiltInAggregationFunctionImplementation,
+                    "Only BuiltInAggregationFunctionImplementation Support Lambdas Interfaces");
             for (int i = 0; i < lambdas.size(); i++) {
-                List<Class> lambdaInterfaces = internalAggregationFunction.getLambdaInterfaces();
+                List<Class> lambdaInterfaces = ((BuiltInAggregationFunctionImplementation) javaAggregateFunctionImplementation).getLambdaInterfaces();
                 Class<? extends LambdaProvider> lambdaProviderClass = compileLambdaProvider(
                         lambdas.get(i),
                         metadata,
@@ -2996,8 +3015,8 @@ public class LocalExecutionPlanner
                 sortKeys = orderBy.getOrderByVariables();
                 sortOrders = getOrderingList(orderBy);
             }
-
-            return internalAggregationFunction.bind(
+            return generateAccumulatorFactory(
+                    javaAggregateFunctionImplementation,
                     valueChannels,
                     maskChannel,
                     source.getTypes(),
@@ -3064,6 +3083,7 @@ public class LocalExecutionPlanner
                     node.getAggregations(),
                     node.getGlobalGroupingSets(),
                     node.getGroupingKeys(),
+                    node.getPreGroupedVariables(),
                     node.getStep(),
                     node.getHashVariable(),
                     node.getGroupIdVariable(),
@@ -3088,6 +3108,7 @@ public class LocalExecutionPlanner
                 Map<VariableReferenceExpression, Aggregation> aggregations,
                 Set<Integer> globalGroupingSets,
                 List<VariableReferenceExpression> groupbyVariables,
+                List<VariableReferenceExpression> preGroupedVariables,
                 Step step,
                 Optional<VariableReferenceExpression> hashVariable,
                 Optional<VariableReferenceExpression> groupIdVariable,
@@ -3156,11 +3177,13 @@ public class LocalExecutionPlanner
             }
             else {
                 Optional<Integer> hashChannel = hashVariable.map(variableChannelGetter(source));
+                List<Integer> preGroupedChannels = getChannelsForVariables(preGroupedVariables, source.getLayout());
                 return new HashAggregationOperatorFactory(
                         context.getNextOperatorId(),
                         planNodeId,
                         groupByTypes,
                         groupByChannels,
+                        preGroupedChannels,
                         ImmutableList.copyOf(globalGroupingSets),
                         step,
                         hasDefaultOutput,

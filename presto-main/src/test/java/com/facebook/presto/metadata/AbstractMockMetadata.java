@@ -253,6 +253,12 @@ public abstract class AbstractMockMetadata
     }
 
     @Override
+    public void truncateTable(Session session, TableHandle tableHandle)
+    {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
     public Optional<NewTableLayout> getNewTableLayout(Session session, String catalogName, ConnectorTableMetadata tableMetadata)
     {
         throw new UnsupportedOperationException();
@@ -427,7 +433,7 @@ public abstract class AbstractMockMetadata
     }
 
     @Override
-    public MaterializedViewStatus getMaterializedViewStatus(Session session, QualifiedObjectName materializedViewName)
+    public MaterializedViewStatus getMaterializedViewStatus(Session session, QualifiedObjectName materializedViewName, TupleDomain<String> baseQueryDomain)
     {
         throw new UnsupportedOperationException();
     }

@@ -472,6 +472,7 @@ public class PruneUnreferencedOutputs
                     node.getTable(),
                     newOutputs,
                     newAssignments,
+                    node.getTableConstraints(),
                     node.getCurrentConstraint(),
                     node.getEnforcedConstraint());
         }
@@ -849,7 +850,7 @@ public class PruneUnreferencedOutputs
             List<List<RowExpression>> rewrittenRows = rowBuilders.stream()
                     .map(ImmutableList.Builder::build)
                     .collect(toImmutableList());
-            return new ValuesNode(node.getSourceLocation(), node.getId(), rewrittenOutputVariablesBuilder.build(), rewrittenRows);
+            return new ValuesNode(node.getSourceLocation(), node.getId(), rewrittenOutputVariablesBuilder.build(), rewrittenRows, node.getValuesNodeLabel());
         }
 
         @Override

@@ -14,14 +14,19 @@
 package com.facebook.presto.hive;
 
 import com.facebook.presto.common.Subfield;
+import com.facebook.presto.common.plan.PlanCanonicalizationStrategy;
 import com.facebook.presto.common.predicate.TupleDomain;
 import com.facebook.presto.common.predicate.TupleDomain.ColumnDomain;
 import com.facebook.presto.hive.HiveBucketing.HiveBucketFilter;
 import com.facebook.presto.hive.metastore.Column;
+import com.facebook.presto.hive.metastore.MetastoreContext;
+import com.facebook.presto.hive.metastore.SemiTransactionalHiveMetastore;
+import com.facebook.presto.hive.metastore.Table;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ConnectorSplit;
 import com.facebook.presto.spi.ConnectorTableLayoutHandle;
 import com.facebook.presto.spi.SchemaTableName;
+import com.facebook.presto.spi.TableNotFoundException;
 import com.facebook.presto.spi.relation.RowExpression;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
@@ -36,11 +41,16 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
+import static com.facebook.presto.common.predicate.TupleDomain.toLinkedMap;
+import static com.facebook.presto.common.predicate.TupleDomain.withColumnDomains;
+import static com.facebook.presto.expressions.CanonicalRowExpressionRewriter.canonicalizeRowExpression;
+import static com.facebook.presto.hive.HiveMetadata.createPredicate;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
+import static java.util.Comparator.comparing;
 import static java.util.Objects.requireNonNull;
 
-public final class HiveTableLayoutHandle
+public class HiveTableLayoutHandle
         implements ConnectorTableLayoutHandle
 {
     private final SchemaTableName schemaTableName;
@@ -58,7 +68,7 @@ public final class HiveTableLayoutHandle
     private final String layoutString;
     private final Optional<Set<HiveColumnHandle>> requestedColumns;
     private final boolean partialAggregationsPushedDown;
-
+    private final boolean appendRowNumberEnabled;
     // coordinator-only properties
     @Nullable
     private final List<HivePartition> partitions;
@@ -79,7 +89,8 @@ public final class HiveTableLayoutHandle
             @JsonProperty("pushdownFilterEnabled") boolean pushdownFilterEnabled,
             @JsonProperty("layoutString") String layoutString,
             @JsonProperty("requestedColumns") Optional<Set<HiveColumnHandle>> requestedColumns,
-            @JsonProperty("partialAggregationsPushedDown") boolean partialAggregationsPushedDown)
+            @JsonProperty("partialAggregationsPushedDown") boolean partialAggregationsPushedDown,
+            @JsonProperty("appendRowNumber") boolean appendRowNumberEnabled)
     {
         this.schemaTableName = requireNonNull(schemaTableName, "table is null");
         this.tablePath = requireNonNull(tablePath, "tablePath is null");
@@ -97,6 +108,7 @@ public final class HiveTableLayoutHandle
         this.layoutString = requireNonNull(layoutString, "layoutString is null");
         this.requestedColumns = requireNonNull(requestedColumns, "requestedColumns is null");
         this.partialAggregationsPushedDown = partialAggregationsPushedDown;
+        this.appendRowNumberEnabled = appendRowNumberEnabled;
     }
 
     public HiveTableLayoutHandle(
@@ -115,7 +127,8 @@ public final class HiveTableLayoutHandle
             boolean pushdownFilterEnabled,
             String layoutString,
             Optional<Set<HiveColumnHandle>> requestedColumns,
-            boolean partialAggregationsPushedDown)
+            boolean partialAggregationsPushedDown,
+            boolean appendRowNumberEnabled)
     {
         this.schemaTableName = requireNonNull(schemaTableName, "table is null");
         this.tablePath = requireNonNull(tablePath, "tablePath is null");
@@ -133,6 +146,7 @@ public final class HiveTableLayoutHandle
         this.layoutString = requireNonNull(layoutString, "layoutString is null");
         this.requestedColumns = requireNonNull(requestedColumns, "requestedColumns is null");
         this.partialAggregationsPushedDown = partialAggregationsPushedDown;
+        this.appendRowNumberEnabled = appendRowNumberEnabled;
     }
 
     @JsonProperty
@@ -242,8 +256,14 @@ public final class HiveTableLayoutHandle
         return partialAggregationsPushedDown;
     }
 
+    @JsonProperty
+    public boolean isAppendRowNumberEnabled()
+    {
+        return appendRowNumberEnabled;
+    }
+
     @Override
-    public Object getIdentifier(Optional<ConnectorSplit> split)
+    public Object getIdentifier(Optional<ConnectorSplit> split, PlanCanonicalizationStrategy canonicalizationStrategy)
     {
         TupleDomain<Subfield> domainPredicate = this.domainPredicate;
 
@@ -265,9 +285,46 @@ public final class HiveTableLayoutHandle
         // which is unrelated to identifier purpose, or has already been applied as the boundary of split.
         return ImmutableMap.builder()
                 .put("schemaTableName", schemaTableName)
-                .put("domainPredicate", domainPredicate)
-                .put("remainingPredicate", remainingPredicate)
+                .put("domainPredicate", domainPredicate.canonicalize(false))
+                .put("remainingPredicate", canonicalizeRowExpression(remainingPredicate, false))
+                .put("constraint", getConstraint(canonicalizationStrategy))
+                // TODO: Decide what to do with bucketFilter when canonicalizing
                 .put("bucketFilter", bucketFilter)
                 .build();
+    }
+
+    private TupleDomain<ColumnHandle> getConstraint(PlanCanonicalizationStrategy canonicalizationStrategy)
+    {
+        if (canonicalizationStrategy == PlanCanonicalizationStrategy.DEFAULT) {
+            return TupleDomain.all();
+        }
+        // Canonicalize constraint by removing constants when column is a partition key. This assumes
+        // all partitions are similar, and will have similar statistics like size, cardinality etc.
+        // Constants are only removed from point checks, and not range checks. Example:
+        // `x = 1` is equivalent to `x = 1000`
+        // `x > 1` is NOT equivalent to `x > 1000`
+        TupleDomain<ColumnHandle> constraint = createPredicate(ImmutableList.copyOf(partitionColumns), partitions);
+        if (pushdownFilterEnabled) {
+            constraint = getDomainPredicate()
+                    .transform(subfield -> subfield.getPath().isEmpty() ? subfield.getRootName() : null)
+                    .transform(getPredicateColumns()::get)
+                    .transform(ColumnHandle.class::cast)
+                    .intersect(constraint);
+        }
+
+        constraint = withColumnDomains(constraint.getDomains().get().entrySet().stream()
+                .sorted(comparing(entry -> entry.getKey().toString()))
+                .collect(toLinkedMap(Map.Entry::getKey, entry -> entry.getValue().canonicalize(isPartitionKey(entry.getKey())))));
+        return constraint;
+    }
+
+    private static boolean isPartitionKey(ColumnHandle columnHandle)
+    {
+        return columnHandle instanceof HiveColumnHandle && ((HiveColumnHandle) columnHandle).isPartitionKey();
+    }
+
+    public Table getTable(SemiTransactionalHiveMetastore metastore, MetastoreContext metastoreContext)
+    {
+        return metastore.getTable(metastoreContext, schemaTableName.getSchemaName(), schemaTableName.getTableName()).orElseThrow(() -> new TableNotFoundException(schemaTableName));
     }
 }

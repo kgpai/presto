@@ -233,6 +233,11 @@ public interface Metadata
      */
     void dropTable(Session session, TableHandle tableHandle);
 
+    /**
+     * Truncates the specified table
+     */
+    void truncateTable(Session session, TableHandle tableHandle);
+
     Optional<NewTableLayout> getNewTableLayout(Session session, String catalogName, ConnectorTableMetadata tableMetadata);
 
     @Experimental
@@ -349,6 +354,14 @@ public interface Metadata
     Optional<ViewDefinition> getView(Session session, QualifiedObjectName viewName);
 
     /**
+     * Is the specified table a view.
+     */
+    default boolean isView(Session session, QualifiedObjectName viewName)
+    {
+        return getView(session, viewName).isPresent();
+    }
+
+    /**
      * Creates the specified view with the specified view definition.
      */
     void createView(Session session, String catalogName, ConnectorTableMetadata viewMetadata, String viewData, boolean replace);
@@ -364,6 +377,14 @@ public interface Metadata
     Optional<ConnectorMaterializedViewDefinition> getMaterializedView(Session session, QualifiedObjectName viewName);
 
     /**
+     * Is the specified table a materialized view.
+     */
+    default boolean isMaterializedView(Session session, QualifiedObjectName viewName)
+    {
+        return getMaterializedView(session, viewName).isPresent();
+    }
+
+    /**
      * Creates the specified materialized view with the specified view definition.
      */
     void createMaterializedView(Session session, String catalogName, ConnectorTableMetadata viewMetadata, ConnectorMaterializedViewDefinition viewDefinition, boolean ignoreExisting);
@@ -376,7 +397,7 @@ public interface Metadata
     /**
      * Get Materialized view status
      */
-    MaterializedViewStatus getMaterializedViewStatus(Session session, QualifiedObjectName materializedViewName);
+    MaterializedViewStatus getMaterializedViewStatus(Session session, QualifiedObjectName materializedViewName, TupleDomain<String> baseQueryDomain);
 
     /**
      * Begin refresh materialized view

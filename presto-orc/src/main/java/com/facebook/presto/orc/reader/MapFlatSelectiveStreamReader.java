@@ -68,11 +68,11 @@ import static com.facebook.presto.common.predicate.TupleDomainFilter.IS_NULL;
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.IN_MAP;
 import static com.facebook.presto.orc.metadata.Stream.StreamKind.PRESENT;
 import static com.facebook.presto.orc.reader.SelectiveStreamReaders.initializeOutputPositions;
-import static com.facebook.presto.orc.stream.MissingInputStreamSource.missingStreamSource;
+import static com.facebook.presto.orc.stream.MissingInputStreamSource.getBooleanMissingStreamSource;
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
-import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static java.util.Objects.requireNonNull;
@@ -83,7 +83,6 @@ public class MapFlatSelectiveStreamReader
     private static final int INSTANCE_SIZE = ClassLayout.parseClass(MapFlatSelectiveStreamReader.class).instanceSize();
 
     private final StreamDescriptor streamDescriptor;
-    private final boolean legacyMapSubscript;
 
     // This is the StreamDescriptor for the value stream with sequence ID 0, it is used to derive StreamDescriptors for the
     // value streams with other sequence IDs
@@ -113,7 +112,7 @@ public class MapFlatSelectiveStreamReader
     private int readOffset;
     private int[] nestedReadOffsets;
 
-    private InputStreamSource<BooleanInputStream> presentStreamSource = missingStreamSource(BooleanInputStream.class);
+    private InputStreamSource<BooleanInputStream> presentStreamSource = getBooleanMissingStreamSource();
     @Nullable
     private BooleanInputStream presentStream;
 
@@ -143,7 +142,6 @@ public class MapFlatSelectiveStreamReader
             Optional<Type> outputType,
             DateTimeZone hiveStorageTimeZone,
             OrcRecordReaderOptions options,
-            boolean legacyMapSubscript,
             OrcAggregatedMemoryContext systemMemoryContext)
     {
         this.options = requireNonNull(options);
@@ -151,7 +149,6 @@ public class MapFlatSelectiveStreamReader
         checkArgument(streamDescriptor.getNestedStreams().size() == 2, "there must be exactly 2 nested stream descriptor");
 
         this.streamDescriptor = requireNonNull(streamDescriptor, "streamDescriptor is null");
-        this.legacyMapSubscript = legacyMapSubscript;
         this.keyOrcTypeKind = streamDescriptor.getNestedStreams().get(0).getOrcTypeKind();
         this.baseValueStreamDescriptor = streamDescriptor.getNestedStreams().get(1);
         this.hiveStorageTimeZone = requireNonNull(hiveStorageTimeZone, "hiveStorageTimeZone is null");
@@ -235,8 +232,8 @@ public class MapFlatSelectiveStreamReader
 
         outputPositions = initializeOutputPositions(outputPositions, positions, positionCount);
 
-        if (presentStream != null && keyCount == 0) {
-            readAllNulls(positions, positionCount);
+        if (keyCount == 0 && presentStream == null) {
+            readAllEmpty(positions, positionCount);
         }
         else {
             readNotAllNulls(offset, positions, positionCount);
@@ -247,20 +244,19 @@ public class MapFlatSelectiveStreamReader
         return outputPositionCount;
     }
 
-    private void readAllNulls(int[] positions, int positionCount)
-            throws IOException
+    private void readAllEmpty(int[] positions, int positionCount)
     {
-        presentStream.skip(positions[positionCount - 1]);
+        outputPositions = positions;
+        outputPositionsReadOnly = true;
 
-        allNulls = true;
-
-        if (!nullsAllowed) {
+        if (!nonNullsAllowed) {
+            allNulls = true;
             outputPositionCount = 0;
         }
         else {
             outputPositionCount = positionCount;
-            outputPositions = positions;
-            outputPositionsReadOnly = true;
+            nestedLengths = ensureCapacity(nestedLengths, positionCount);
+            Arrays.fill(nestedLengths, 0);
         }
     }
 
@@ -411,7 +407,7 @@ public class MapFlatSelectiveStreamReader
         presentStream = presentStreamSource.openStream();
 
         for (int i = 0; i < keyCount; i++) {
-            BooleanInputStream inMapStream = requireNonNull(inMapStreamSources.get(i).openStream(), "missing inMapStream at position " + i);
+            BooleanInputStream inMapStream = checkNotNull(inMapStreamSources.get(i).openStream(), "missing inMapStream at position %s", i);
             inMapStreams.add(inMapStream);
         }
 
@@ -642,7 +638,7 @@ public class MapFlatSelectiveStreamReader
     public void startStripe(Stripe stripe)
             throws IOException
     {
-        presentStreamSource = missingStreamSource(BooleanInputStream.class);
+        presentStreamSource = getBooleanMissingStreamSource();
 
         inMapStreamSources.clear();
         valueStreamDescriptors.clear();
@@ -671,9 +667,9 @@ public class MapFlatSelectiveStreamReader
 
             int sequence = entry.getKey();
 
-            inMapStreamSources.add(missingStreamSource(BooleanInputStream.class));
+            inMapStreamSources.add(getBooleanMissingStreamSource());
 
-            StreamDescriptor valueStreamDescriptor = copyStreamDescriptorWithSequence(baseValueStreamDescriptor, sequence);
+            StreamDescriptor valueStreamDescriptor = baseValueStreamDescriptor.duplicate(sequence);
             valueStreamDescriptors.add(valueStreamDescriptor);
 
             SelectiveStreamReader valueStreamReader = SelectiveStreamReaders.createStreamReader(
@@ -683,8 +679,8 @@ public class MapFlatSelectiveStreamReader
                     ImmutableList.of(),
                     hiveStorageTimeZone,
                     options,
-                    legacyMapSubscript,
-                    systemMemoryContext.newOrcAggregatedMemoryContext());
+                    systemMemoryContext.newOrcAggregatedMemoryContext(),
+                    true);
             valueStreamReader.startStripe(stripe);
             valueStreamReaders.add(valueStreamReader);
         }
@@ -704,26 +700,6 @@ public class MapFlatSelectiveStreamReader
         }
 
         return requiredStringKeys.isEmpty() || requiredStringKeys.contains(value.getKey().getBytesKey().toStringUtf8());
-    }
-
-    /**
-     * Creates StreamDescriptor which is a copy of this one with the value of sequence changed to
-     * the value passed in.  Recursively calls itself on the nested streams.
-     */
-    private static StreamDescriptor copyStreamDescriptorWithSequence(StreamDescriptor streamDescriptor, int sequence)
-    {
-        List<StreamDescriptor> streamDescriptors = streamDescriptor.getNestedStreams().stream()
-                .map(stream -> copyStreamDescriptorWithSequence(stream, sequence))
-                .collect(toImmutableList());
-
-        return new StreamDescriptor(
-                streamDescriptor.getStreamName(),
-                streamDescriptor.getStreamId(),
-                streamDescriptor.getFieldName(),
-                streamDescriptor.getOrcType(),
-                streamDescriptor.getOrcDataSource(),
-                streamDescriptors,
-                sequence);
     }
 
     private Block getKeysBlock(List<DwrfSequenceEncoding> sequenceEncodings)
@@ -795,6 +771,9 @@ public class MapFlatSelectiveStreamReader
     public void startRowGroup(InputStreamSources dataStreamSources)
             throws IOException
     {
+        presentStream = null;
+        inMapStreams.clear();
+
         presentStreamSource = dataStreamSources.getInputStreamSource(streamDescriptor, PRESENT, BooleanInputStream.class);
 
         for (int i = 0; i < keyCount; i++) {
@@ -809,9 +788,6 @@ public class MapFlatSelectiveStreamReader
         nestedPositions = ensureCapacity(nestedPositions, keyCount);
         nestedPositionCounts = ensureCapacity(nestedPositionCounts, keyCount);
         inMap = ensureCapacity(inMap, keyCount);
-
-        presentStream = null;
-        inMapStreams.clear();
 
         rowGroupOpen = false;
 

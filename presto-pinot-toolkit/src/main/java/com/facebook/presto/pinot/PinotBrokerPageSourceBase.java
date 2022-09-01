@@ -31,6 +31,7 @@ import com.facebook.presto.common.type.TimestampType;
 import com.facebook.presto.common.type.TinyintType;
 import com.facebook.presto.common.type.Type;
 import com.facebook.presto.common.type.VarcharType;
+import com.facebook.presto.pinot.auth.PinotBrokerAuthenticationProvider;
 import com.facebook.presto.pinot.query.PinotQueryGenerator;
 import com.facebook.presto.spi.ConnectorPageSource;
 import com.facebook.presto.spi.ConnectorSession;
@@ -42,7 +43,6 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
-import org.apache.pinot.spi.utils.TimestampUtils;
 
 import java.net.URI;
 import java.util.ArrayList;
@@ -51,14 +51,17 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 
-import static com.facebook.presto.pinot.PinotErrorCode.PINOT_DECODE_ERROR;
 import static com.facebook.presto.pinot.PinotErrorCode.PINOT_EXCEPTION;
 import static com.facebook.presto.pinot.PinotErrorCode.PINOT_INSUFFICIENT_SERVER_RESPONSE;
 import static com.facebook.presto.pinot.PinotErrorCode.PINOT_REQUEST_GENERATOR_FAILURE;
+import static com.facebook.presto.pinot.PinotErrorCode.PINOT_UNAUTHENTICATED_EXCEPTION;
 import static com.facebook.presto.pinot.PinotErrorCode.PINOT_UNEXPECTED_RESPONSE;
 import static com.facebook.presto.pinot.PinotErrorCode.PINOT_UNSUPPORTED_COLUMN_TYPE;
 import static com.facebook.presto.pinot.PinotUtils.doWithRetries;
+import static com.facebook.presto.pinot.PinotUtils.parseDouble;
+import static com.facebook.presto.pinot.PinotUtils.parseTimestamp;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.net.HttpHeaders.AUTHORIZATION;
 import static java.lang.Boolean.parseBoolean;
 import static java.lang.Long.parseLong;
 import static java.util.Objects.requireNonNull;
@@ -66,11 +69,6 @@ import static java.util.Objects.requireNonNull;
 public abstract class PinotBrokerPageSourceBase
         implements ConnectorPageSource
 {
-    private static final String PINOT_INFINITY = "∞";
-    private static final String PINOT_POSITIVE_INFINITY = "+" + PINOT_INFINITY;
-    private static final String PINOT_NEGATIVE_INFINITY = "-" + PINOT_INFINITY;
-    private static final Double PRESTO_INFINITY = Double.POSITIVE_INFINITY;
-    private static final Double PRESTO_NEGATIVE_INFINITY = Double.NEGATIVE_INFINITY;
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     protected final PinotConfig pinotConfig;
@@ -78,6 +76,7 @@ public abstract class PinotBrokerPageSourceBase
     protected final PinotClusterInfoFetcher clusterInfoFetcher;
     protected final ConnectorSession session;
     protected final ObjectMapper objectMapper;
+    protected final PinotBrokerAuthenticationProvider brokerAuthenticationProvider;
 
     protected boolean finished;
     protected long readTimeNanos;
@@ -88,30 +87,15 @@ public abstract class PinotBrokerPageSourceBase
             ConnectorSession session,
             List<PinotColumnHandle> columnHandles,
             PinotClusterInfoFetcher clusterInfoFetcher,
-            ObjectMapper objectMapper)
+            ObjectMapper objectMapper,
+            PinotBrokerAuthenticationProvider brokerAuthenticationProvider)
     {
         this.pinotConfig = requireNonNull(pinotConfig, "pinot config is null");
         this.clusterInfoFetcher = requireNonNull(clusterInfoFetcher, "cluster info fetcher is null");
         this.columnHandles = ImmutableList.copyOf(columnHandles);
         this.session = requireNonNull(session, "session is null");
         this.objectMapper = requireNonNull(objectMapper, "object mapper is null");
-    }
-
-    private static Double parseDouble(String value)
-    {
-        try {
-            return Double.valueOf(value);
-        }
-        catch (NumberFormatException ne) {
-            switch (value) {
-                case PINOT_INFINITY:
-                case PINOT_POSITIVE_INFINITY:
-                    return PRESTO_INFINITY;
-                case PINOT_NEGATIVE_INFINITY:
-                    return PRESTO_NEGATIVE_INFINITY;
-            }
-            throw new PinotException(PINOT_DECODE_ERROR, Optional.empty(), "Cannot decode double value from pinot " + value, ne);
-        }
+        this.brokerAuthenticationProvider = brokerAuthenticationProvider;
     }
 
     protected void setValue(Type type, BlockBuilder blockBuilder, JsonNode value)
@@ -187,16 +171,6 @@ public abstract class PinotBrokerPageSourceBase
         }
     }
 
-    private long parseTimestamp(String value)
-    {
-        try {
-            return parseLong(value);
-        }
-        catch (Exception e) {
-            return TimestampUtils.toMillisSinceEpoch(value);
-        }
-    }
-
     @Override
     public long getCompletedBytes()
     {
@@ -269,7 +243,7 @@ public abstract class PinotBrokerPageSourceBase
         }
     }
 
-    protected static void handleCommonResponse(String pql, JsonNode jsonBody)
+    protected static void handleCommonResponse(String pinotQuery, JsonNode jsonBody)
     {
         JsonNode numServersResponded = jsonBody.get("numServersResponded");
         JsonNode numServersQueried = jsonBody.get("numServersQueried");
@@ -277,18 +251,24 @@ public abstract class PinotBrokerPageSourceBase
         if (numServersQueried == null || numServersResponded == null || numServersQueried.asInt() > numServersResponded.asInt()) {
             throw new PinotException(
                 PINOT_INSUFFICIENT_SERVER_RESPONSE,
-                Optional.of(pql),
-                String.format("Only %s out of %s servers responded for query %s", numServersResponded.asInt(), numServersQueried.asInt(), pql));
+                Optional.of(pinotQuery),
+                String.format("Only %s out of %s servers responded for query %s", numServersResponded.asInt(), numServersQueried.asInt(), pinotQuery));
         }
 
         JsonNode exceptions = jsonBody.get("exceptions");
         if (exceptions != null && exceptions.isArray() && exceptions.size() > 0) {
+            if (exceptions.get(0).get("errorCode").asInt() == 180) {
+                throw new PinotException(
+                    PINOT_UNAUTHENTICATED_EXCEPTION,
+                    Optional.empty(),
+                    "Query authentication failed.");
+            }
             // Pinot is known to return exceptions with benign errorcodes like 200
             // so we treat any exception as an error
             throw new PinotException(
                 PINOT_EXCEPTION,
-                Optional.of(pql),
-                String.format("Query %s encountered exception %s", pql, exceptions.get(0)));
+                Optional.of(pinotQuery),
+                String.format("Query %s encountered exception %s", pinotQuery, exceptions.get(0)));
         }
     }
 
@@ -325,8 +305,8 @@ public abstract class PinotBrokerPageSourceBase
         return doWithRetries(PinotSessionProperties.getPinotRetryCount(session), (retryNumber) -> {
             String queryHost;
             Optional<String> rpcService;
-            if (pinotConfig.getRestProxyUrl() != null) {
-                queryHost = pinotConfig.getRestProxyUrl();
+            if (pinotConfig.isUseProxy()) {
+                queryHost = pinotConfig.getControllerUrl();
                 rpcService = Optional.ofNullable(pinotConfig.getRestProxyServiceForQuery());
             }
             else {
@@ -336,6 +316,7 @@ public abstract class PinotBrokerPageSourceBase
             Request.Builder builder = Request.Builder
                     .preparePost()
                     .setUri(URI.create(String.format(getQueryUrlTemplate(), queryHost)));
+            brokerAuthenticationProvider.getAuthenticationToken(session).ifPresent(token -> builder.setHeader(AUTHORIZATION, token));
             String body = clusterInfoFetcher.doHttpActionWithHeaders(builder, Optional.of(getRequestPayload(pinotQuery)), rpcService);
             return populateFromQueryResults(pinotQuery, blockBuilders, types, body);
         });

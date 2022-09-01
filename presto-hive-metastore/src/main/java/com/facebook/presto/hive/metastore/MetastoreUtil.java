@@ -13,6 +13,7 @@
  */
 package com.facebook.presto.hive.metastore;
 
+import com.facebook.airlift.log.Logger;
 import com.facebook.presto.common.Page;
 import com.facebook.presto.common.block.Block;
 import com.facebook.presto.common.predicate.Domain;
@@ -100,6 +101,7 @@ import static com.facebook.presto.common.type.VarbinaryType.VARBINARY;
 import static com.facebook.presto.common.type.Varchars.isVarcharType;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_FILESYSTEM_ERROR;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_INVALID_PARTITION_VALUE;
+import static com.facebook.presto.hive.metastore.PrestoTableType.MANAGED_TABLE;
 import static com.facebook.presto.spi.StandardErrorCode.NOT_SUPPORTED;
 import static com.facebook.presto.spi.statistics.ColumnStatisticType.MAX_VALUE;
 import static com.facebook.presto.spi.statistics.ColumnStatisticType.MAX_VALUE_SIZE_IN_BYTES;
@@ -112,10 +114,12 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Strings.isNullOrEmpty;
 import static com.google.common.base.Strings.padEnd;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.io.BaseEncoding.base16;
 import static java.lang.Float.intBitsToFloat;
 import static java.lang.String.format;
 import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Locale.ENGLISH;
 import static java.util.stream.Collectors.toList;
 import static org.apache.hadoop.hive.common.FileUtils.unescapePathName;
 import static org.apache.hadoop.hive.metastore.ColumnType.typeToThriftType;
@@ -136,6 +140,8 @@ import static org.joda.time.DateTimeZone.UTC;
 
 public class MetastoreUtil
 {
+    private static final Logger log = Logger.get(MetastoreUtil.class);
+
     public static final String METASTORE_HEADERS = "metastore_headers";
     public static final String PRESTO_OFFLINE = "presto_offline";
     public static final String AVRO_SCHEMA_URL_KEY = "avro.schema.url";
@@ -144,6 +150,7 @@ public class MetastoreUtil
     public static final String PRESTO_QUERY_ID_NAME = "presto_query_id";
     public static final String HIVE_DEFAULT_DYNAMIC_PARTITION = "__HIVE_DEFAULT_PARTITION__";
     public static final String USER_DEFINED_TYPE_ENCODING_ENABLED = "user_defined_type_encoding";
+    public static final String DEFAULT_METASTORE_USER = "presto";
 
     @SuppressWarnings("OctalInteger")
     public static final FsPermission ALL_PERMISSIONS = new FsPermission((short) 0777);
@@ -160,6 +167,11 @@ public class MetastoreUtil
     // rather than copying the old transient_lastDdlTime to hive partition.
     private static final String TRANSIENT_LAST_DDL_TIME = "transient_lastDdlTime";
     private static final Set<String> STATS_PROPERTIES = ImmutableSet.of(NUM_FILES, NUM_ROWS, RAW_DATA_SIZE, TOTAL_SIZE, TRANSIENT_LAST_DDL_TIME);
+    private static final Set<ColumnStatisticType> ORDERABLE_STATS = ImmutableSet.of(MIN_VALUE, MAX_VALUE);
+    public static final String ICEBERG_TABLE_TYPE_NAME = "table_type";
+    public static final String ICEBERG_TABLE_TYPE_VALUE = "iceberg";
+    public static final String SPARK_TABLE_PROVIDER_KEY = "spark.sql.sources.provider";
+    public static final String DELTA_LAKE_PROVIDER = "delta";
 
     private MetastoreUtil()
     {
@@ -880,7 +892,11 @@ public class MetastoreUtil
             return getSupportedColumnStatistics(((TypeWithName) type).getType());
         }
         if (type instanceof DistinctType) {
-            return getSupportedColumnStatistics(((DistinctType) type).getBaseType());
+            Set<ColumnStatisticType> stats = getSupportedColumnStatistics(((DistinctType) type).getBaseType());
+            if (!type.isOrderable()) {
+                stats = stats.stream().filter(stat -> !ORDERABLE_STATS.contains(stat)).collect(toImmutableSet());
+            }
+            return stats;
         }
         if (type instanceof EnumType) {
             return getSupportedColumnStatistics(((EnumType) type).getValueType());
@@ -947,5 +963,42 @@ public class MetastoreUtil
         catch (Exception e) {
             return false;
         }
+    }
+
+    public static boolean isManagedTable(String tableType)
+    {
+        return tableType.equals(MANAGED_TABLE.name());
+    }
+
+    public static void deleteDirectoryRecursively(HdfsContext context, HdfsEnvironment hdfsEnvironment, Path path, boolean recursive)
+    {
+        try {
+            hdfsEnvironment.getFileSystem(context, path).delete(path, recursive);
+        }
+        catch (IOException | RuntimeException e) {
+            // don't fail if unable to delete path
+            log.warn(e, "Failed to delete path: " + path.toString());
+        }
+    }
+
+    public static boolean isDeltaLakeTable(Table table)
+    {
+        return isDeltaLakeTable(table.getParameters());
+    }
+
+    public static boolean isDeltaLakeTable(Map<String, String> tableParameters)
+    {
+        return tableParameters.containsKey(SPARK_TABLE_PROVIDER_KEY)
+                && tableParameters.get(SPARK_TABLE_PROVIDER_KEY).toLowerCase(ENGLISH).equals(DELTA_LAKE_PROVIDER);
+    }
+
+    public static boolean isIcebergTable(Table table)
+    {
+        return isIcebergTable(table.getParameters());
+    }
+
+    public static boolean isIcebergTable(Map<String, String> tableParameters)
+    {
+        return ICEBERG_TABLE_TYPE_VALUE.equalsIgnoreCase(tableParameters.get(ICEBERG_TABLE_TYPE_NAME));
     }
 }

@@ -103,6 +103,8 @@ public class TestBasicQueryInfo
                                 30,
                                 DataSize.valueOf("31GB"),
                                 32,
+                                DataSize.valueOf("32GB"),
+                                40,
                                 33,
                                 DataSize.valueOf("34GB"),
                                 DataSize.valueOf("35GB"),
@@ -147,6 +149,7 @@ public class TestBasicQueryInfo
         assertEquals(basicInfo.getMemoryPool().getId(), "reserved");
         assertEquals(basicInfo.isScheduled(), false);
         assertEquals(basicInfo.getQuery(), "SELECT 4");
+        assertEquals(basicInfo.getQueryHash(), "235ca215765cbfca");
         assertEquals(basicInfo.getQueryType(), Optional.of(QueryType.INSERT));
 
         assertEquals(basicInfo.getQueryStats().getCreateTime(), DateTime.parse("1991-09-06T05:00-05:30"));

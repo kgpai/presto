@@ -36,6 +36,7 @@ import com.facebook.presto.hive.metastore.thrift.TestingHiveCluster;
 import com.facebook.presto.hive.metastore.thrift.ThriftHiveMetastore;
 import com.facebook.presto.spi.ConnectorSession;
 import com.facebook.presto.spi.SchemaTableName;
+import com.facebook.presto.spi.connector.ConnectorCommitHandle;
 import com.facebook.presto.spi.security.PrestoPrincipal;
 import com.facebook.presto.spi.security.RoleGrant;
 import com.facebook.presto.spi.statistics.ColumnStatisticType;
@@ -75,11 +76,11 @@ public class TestingSemiTransactionalHiveMetastore
         // none of these values matter, as we never use them
         HiveClientConfig config = new HiveClientConfig();
         MetastoreClientConfig metastoreClientConfig = new MetastoreClientConfig();
-        HdfsConfiguration hdfsConfiguration = new HiveHdfsConfiguration(new HdfsConfigurationInitializer(config, metastoreClientConfig), ImmutableSet.of());
+        HdfsConfiguration hdfsConfiguration = new HiveHdfsConfiguration(new HdfsConfigurationInitializer(config, metastoreClientConfig), ImmutableSet.of(), config);
         HdfsEnvironment hdfsEnvironment = new HdfsEnvironment(hdfsConfiguration, metastoreClientConfig, new NoHdfsAuthentication());
         HiveCluster hiveCluster = new TestingHiveCluster(metastoreClientConfig, HOST, PORT);
         ColumnConverterProvider columnConverterProvider = HiveColumnConverterProvider.DEFAULT_COLUMN_CONVERTER_PROVIDER;
-        ExtendedHiveMetastore delegate = new BridgingHiveMetastore(new ThriftHiveMetastore(hiveCluster, metastoreClientConfig), new HivePartitionMutator());
+        ExtendedHiveMetastore delegate = new BridgingHiveMetastore(new ThriftHiveMetastore(hiveCluster, metastoreClientConfig, hdfsEnvironment), new HivePartitionMutator());
         ExecutorService executor = newCachedThreadPool(daemonThreadsNamed("hive-%s"));
         ListeningExecutorService renameExecutor = listeningDecorator(executor);
 
@@ -91,6 +92,7 @@ public class TestingSemiTransactionalHiveMetastore
         HiveTableName hiveTableName = new HiveTableName(database, tableName);
         tablesMap.put(hiveTableName, table);
         partitionsMap.put(hiveTableName, partitions);
+        partitionNames = partitions;
     }
 
     @Override
@@ -339,7 +341,7 @@ public class TestingSemiTransactionalHiveMetastore
     }
 
     @Override
-    public synchronized void commit()
+    public synchronized ConnectorCommitHandle commit()
     {
         throw new UnsupportedOperationException("method not implemented");
     }

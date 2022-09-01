@@ -324,6 +324,16 @@ public interface ConnectorMetadata
     }
 
     /**
+     * Truncates the specified table
+     *
+     * @throws RuntimeException if the table cannot be truncated or table handle is no longer valid
+     */
+    default void truncateTable(ConnectorSession session, ConnectorTableHandle tableHandle)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "This connector does not support truncating tables");
+    }
+
+    /**
      * Rename the specified table
      */
     default void renameTable(ConnectorSession session, ConnectorTableHandle tableHandle, SchemaTableName newTableName)
@@ -588,7 +598,14 @@ public interface ConnectorMetadata
 
     /**
      * Get the materialized view status to inform the engine how much data has been materialized in the view
+     * @param baseQueryDomain The domain from which to consider missing partitions. For example, a query that
+     * selects a specific date range can consider only partitions from that range when determining view staleness.
      */
+    default MaterializedViewStatus getMaterializedViewStatus(ConnectorSession session, SchemaTableName materializedViewName, TupleDomain<String> baseQueryDomain)
+    {
+        throw new PrestoException(NOT_SUPPORTED, "This connector does not support getting materialized views status");
+    }
+
     default MaterializedViewStatus getMaterializedViewStatus(ConnectorSession session, SchemaTableName materializedViewName)
     {
         throw new PrestoException(NOT_SUPPORTED, "This connector does not support getting materialized views status");

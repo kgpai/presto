@@ -25,6 +25,7 @@ import com.facebook.presto.matching.Match;
 import com.facebook.presto.matching.Matcher;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.WarningCollector;
+import com.facebook.presto.spi.plan.LogicalPropertiesProvider;
 import com.facebook.presto.spi.plan.PlanNode;
 import com.facebook.presto.spi.plan.PlanNodeIdAllocator;
 import com.facebook.presto.sql.planner.PlanVariableAllocator;
@@ -40,6 +41,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 
+import static com.facebook.presto.common.RuntimeUnit.NANO;
 import static com.facebook.presto.spi.StandardErrorCode.OPTIMIZER_TIMEOUT;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -55,13 +57,24 @@ public class IterativeOptimizer
     private final CostCalculator costCalculator;
     private final List<PlanOptimizer> legacyRules;
     private final RuleIndex ruleIndex;
+    private final Optional<LogicalPropertiesProvider> logicalPropertiesProvider;
 
     public IterativeOptimizer(RuleStatsRecorder stats, StatsCalculator statsCalculator, CostCalculator costCalculator, Set<Rule<?>> rules)
     {
-        this(stats, statsCalculator, costCalculator, ImmutableList.of(), rules);
+        this(stats, statsCalculator, costCalculator, ImmutableList.of(), Optional.empty(), rules);
+    }
+
+    public IterativeOptimizer(RuleStatsRecorder stats, StatsCalculator statsCalculator, CostCalculator costCalculator, Optional<LogicalPropertiesProvider> logicalPropertiesProvider, Set<Rule<?>> rules)
+    {
+        this(stats, statsCalculator, costCalculator, ImmutableList.of(), logicalPropertiesProvider, rules);
     }
 
     public IterativeOptimizer(RuleStatsRecorder stats, StatsCalculator statsCalculator, CostCalculator costCalculator, List<PlanOptimizer> legacyRules, Set<Rule<?>> newRules)
+    {
+        this(stats, statsCalculator, costCalculator, legacyRules, Optional.empty(), newRules);
+    }
+
+    public IterativeOptimizer(RuleStatsRecorder stats, StatsCalculator statsCalculator, CostCalculator costCalculator, List<PlanOptimizer> legacyRules, Optional<LogicalPropertiesProvider> logicalPropertiesProvider, Set<Rule<?>> newRules)
     {
         this.stats = requireNonNull(stats, "stats is null");
         this.statsCalculator = requireNonNull(statsCalculator, "statsCalculator is null");
@@ -70,6 +83,7 @@ public class IterativeOptimizer
         this.ruleIndex = RuleIndex.builder()
                 .register(newRules)
                 .build();
+        this.logicalPropertiesProvider = requireNonNull(logicalPropertiesProvider, "logicalPropertiesProvider is null");
 
         stats.registerAll(newRules);
     }
@@ -86,12 +100,26 @@ public class IterativeOptimizer
             return plan;
         }
 
-        Memo memo = new Memo(idAllocator, plan);
+        Memo memo;
+        if (SystemSessionProperties.isExploitConstraints(session)) {
+            memo = new Memo(idAllocator, plan, logicalPropertiesProvider);
+        }
+        else {
+            memo = new Memo(idAllocator, plan, Optional.empty());
+        }
+
         Lookup lookup = Lookup.from(planNode -> Stream.of(memo.resolve(planNode)));
         Matcher matcher = new PlanNodeMatcher(lookup);
 
         Duration timeout = SystemSessionProperties.getOptimizerTimeout(session);
-        Context context = new Context(memo, lookup, idAllocator, variableAllocator, System.nanoTime(), timeout.toMillis(), session, warningCollector);
+        StatsProvider statsProvider = new CachingStatsProvider(
+                statsCalculator,
+                Optional.of(memo),
+                lookup,
+                session,
+                variableAllocator.getTypes());
+        CostProvider costProvider = new CachingCostProvider(costCalculator, statsProvider, Optional.of(memo), session);
+        Context context = new Context(memo, lookup, idAllocator, variableAllocator, System.nanoTime(), timeout.toMillis(), session, warningCollector, costProvider, statsProvider);
         boolean planChanged = exploreGroup(memo.getRootGroup(), context, matcher);
         if (!planChanged) {
             return plan;
@@ -141,7 +169,12 @@ public class IterativeOptimizer
                 Rule.Result result = transform(node, rule, matcher, context);
 
                 if (result.getTransformedPlan().isPresent()) {
-                    node = context.memo.replace(group, result.getTransformedPlan().get(), rule.getClass().getName());
+                    // If we rewrite a plan node, topmost node should remain statistically equivalent.
+                    PlanNode transformedNode = result.getTransformedPlan().get();
+                    if (node.getStatsEquivalentPlanNode().isPresent() && !transformedNode.getStatsEquivalentPlanNode().isPresent()) {
+                        transformedNode = transformedNode.assignStatsEquivalentPlanNode(node.getStatsEquivalentPlanNode());
+                    }
+                    node = context.memo.replace(group, transformedNode, rule.getClass().getName());
 
                     done = false;
                     progress = true;
@@ -174,7 +207,7 @@ public class IterativeOptimizer
         }
         stats.record(rule, duration, !result.isEmpty());
         if (SystemSessionProperties.isVerboseRuntimeStatsEnabled(context.session)) {
-            context.session.getRuntimeStats().addMetricValue(String.format("rule%sTimeNanos", rule.getClass().getSimpleName()), duration);
+            context.session.getRuntimeStats().addMetricValue(String.format("rule%sTimeNanos", rule.getClass().getSimpleName()), NANO, duration);
         }
 
         return result;
@@ -198,9 +231,6 @@ public class IterativeOptimizer
 
     private Rule.Context ruleContext(Context context)
     {
-        StatsProvider statsProvider = new CachingStatsProvider(statsCalculator, Optional.of(context.memo), context.lookup, context.session, context.variableAllocator.getTypes());
-        CostProvider costProvider = new CachingCostProvider(costCalculator, statsProvider, Optional.of(context.memo), context.session);
-
         return new Rule.Context()
         {
             @Override
@@ -230,13 +260,13 @@ public class IterativeOptimizer
             @Override
             public StatsProvider getStatsProvider()
             {
-                return statsProvider;
+                return context.statsProvider;
             }
 
             @Override
             public CostProvider getCostProvider()
             {
-                return costProvider;
+                return context.costProvider;
             }
 
             @Override
@@ -263,6 +293,8 @@ public class IterativeOptimizer
         private final long timeoutInMilliseconds;
         private final Session session;
         private final WarningCollector warningCollector;
+        private final CostProvider costProvider;
+        private final StatsProvider statsProvider;
 
         public Context(
                 Memo memo,
@@ -272,7 +304,9 @@ public class IterativeOptimizer
                 long startTimeInNanos,
                 long timeoutInMilliseconds,
                 Session session,
-                WarningCollector warningCollector)
+                WarningCollector warningCollector,
+                CostProvider costProvider,
+                StatsProvider statsProvider)
         {
             checkArgument(timeoutInMilliseconds >= 0, "Timeout has to be a non-negative number [milliseconds]");
 
@@ -284,6 +318,8 @@ public class IterativeOptimizer
             this.timeoutInMilliseconds = timeoutInMilliseconds;
             this.session = session;
             this.warningCollector = warningCollector;
+            this.costProvider = costProvider;
+            this.statsProvider = statsProvider;
         }
 
         public void checkTimeoutNotExhausted()

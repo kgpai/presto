@@ -27,12 +27,10 @@ import scala.Tuple2;
 
 import java.io.IOException;
 import java.util.List;
-import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeoutException;
 
 import static com.facebook.presto.ExceededMemoryLimitException.exceededLocalBroadcastMemoryLimit;
-import static com.facebook.presto.ExceededMemoryLimitException.exceededLocalTotalMemoryLimit;
 import static com.facebook.presto.spark.SparkErrorCode.STORAGE_ERROR;
 import static com.facebook.presto.spark.util.PrestoSparkUtils.computeNextTimeout;
 import static io.airlift.units.DataSize.succinctBytes;
@@ -86,33 +84,34 @@ public class PrestoSparkStorageBasedBroadcastDependency
         broadcastDependency = null;
 
         long compressedBroadcastSizeInBytes = broadcastValue.stream()
-                .mapToLong(metadata -> metadata.getCompressedSizeInBytes())
+                .mapToLong(PrestoSparkStorageHandle::getCompressedSizeInBytes)
                 .sum();
         long uncompressedBroadcastSizeInBytes = broadcastValue.stream()
-                .mapToLong(metadata -> metadata.getUncompressedSizeInBytes())
+                .mapToLong(PrestoSparkStorageHandle::getUncompressedSizeInBytes)
+                .sum();
+        long deserializedBroadcastSizeInBytes = broadcastValue.stream()
+                .mapToLong(PrestoSparkStorageHandle::getDeserializedRetainedSizeInBytes)
                 .sum();
 
-        log.info("Got back %d pages. compressedBroadcastSizeInBytes: %d; uncompressedBroadcastSizeInBytes: %d",
+        log.info(
+                "Got back %d pages. compressedBroadcastSizeInBytes: %d; uncompressedBroadcastSizeInBytes: %d; deserializedBroadcastObjectSizeInBytes: %d",
                 broadcastValue.size(),
                 compressedBroadcastSizeInBytes,
-                uncompressedBroadcastSizeInBytes);
+                uncompressedBroadcastSizeInBytes,
+                deserializedBroadcastSizeInBytes);
 
         long maxBroadcastSizeInBytes = maxBroadcastSize.toBytes();
 
-        if (compressedBroadcastSizeInBytes > maxBroadcastSizeInBytes) {
-            throw exceededLocalBroadcastMemoryLimit(maxBroadcastSize, format("Compressed broadcast size: %s", succinctBytes(compressedBroadcastSizeInBytes)));
+        if (deserializedBroadcastSizeInBytes > maxBroadcastSizeInBytes) {
+            throw exceededLocalBroadcastMemoryLimit(
+                    maxBroadcastSize,
+                    format("Broadcast size: %s", succinctBytes(deserializedBroadcastSizeInBytes)));
         }
 
-        if (uncompressedBroadcastSizeInBytes > maxBroadcastSizeInBytes) {
-            throw exceededLocalBroadcastMemoryLimit(maxBroadcastSize, format("Uncompressed broadcast size: %s", succinctBytes(uncompressedBroadcastSizeInBytes)));
-        }
-
-        if (compressedBroadcastSizeInBytes > queryMaxTotalMemoryPerNode.toBytes() || uncompressedBroadcastSizeInBytes > queryMaxTotalMemoryPerNode.toBytes()) {
-            throw exceededLocalTotalMemoryLimit(
+        if (deserializedBroadcastSizeInBytes > queryMaxTotalMemoryPerNode.toBytes()) {
+            throw exceededLocalBroadcastMemoryLimit(
                     queryMaxTotalMemoryPerNode,
-                    format("Compressed broadcast size: %s; Uncompressed broadcast size: %s", succinctBytes(compressedBroadcastSizeInBytes), succinctBytes(uncompressedBroadcastSizeInBytes)),
-                    false,
-                    Optional.empty());
+                    format("Broadcast size: %s", succinctBytes(deserializedBroadcastSizeInBytes)));
         }
 
         broadcastVariable = sparkContext.broadcast(broadcastValue);
