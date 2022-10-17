@@ -78,6 +78,26 @@ jobs:
           ninja -C _build/debug
           ccache -s
 
+  native-specific-check:
+    runs-on: ubuntu-latest
+    container: prestocpp/velox-check:mikesh-20210609
+
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          submodules: true
+          fetch-depth: 0
+
+      - name: Update submodules
+        run: make -C presto-native-execution submodules
+
+      - name: Format check
+        run: make -C presto-native-execution format-check
+
+      - name: Header check
+        run: make -C presto-native-execution header-check
+
   native-specific-linux:
     runs-on: ubuntu-latest
     container: prestocpp/prestocpp-avx-circleci:mikesh-20220804
@@ -95,12 +115,6 @@ jobs:
 
       - name: Update submodules
         run: make -C presto-native-execution submodules
-
-      - name: Format check
-        run: presto-native-execution/velox/scripts/check.py format master
-
-      - name: Header check
-        run: presto-native-execution/velox/scripts/check.py header master
 
       - name: Get date for ccache
         id: get-date

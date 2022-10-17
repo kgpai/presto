@@ -774,23 +774,6 @@ public class OrcSelectiveRecordReader
         return columnsWithFilterScores.containsKey(columnIndex) || filterFunctionInputMapping.containsKey(columnIndex);
     }
 
-    private void initializePositions(int batchSize)
-    {
-        if (positions == null || positions.length < batchSize) {
-            positions = new int[batchSize];
-            for (int i = 0; i < batchSize; i++) {
-                positions[i] = i;
-            }
-        }
-
-        if (errors == null || errors.length < batchSize) {
-            errors = new RuntimeException[batchSize];
-        }
-        else {
-            Arrays.fill(errors, null);
-        }
-    }
-
     private int applyFilterFunctionWithNoInputs(int positionCount)
     {
         initializeOutputPositions(positionCount);
@@ -876,6 +859,24 @@ public class OrcSelectiveRecordReader
         }
     }
 
+    private void initializePositions(int batchSize)
+    {
+        if (positions == null || positions.length < batchSize) {
+            positions = new int[batchSize];
+        }
+
+        for (int i = 0; i < batchSize; i++) {
+            positions[i] = i;
+        }
+
+        if (errors == null || errors.length < batchSize) {
+            errors = new RuntimeException[batchSize];
+        }
+        else {
+            Arrays.fill(errors, null);
+        }
+    }
+
     private void initializeOutputPositions(int positionCount)
     {
         if (outputPositions == null || outputPositions.length < positionCount) {
@@ -926,7 +927,7 @@ public class OrcSelectiveRecordReader
         }
 
         @Override
-        public final void load(LazyBlock lazyBlock)
+        public void load(LazyBlock lazyBlock)
         {
             if (loaded) {
                 return;
@@ -936,7 +937,12 @@ public class OrcSelectiveRecordReader
                 reader.read(offset, positions, positionCount);
             }
             catch (IOException e) {
+                OrcSelectiveRecordReader.this.getOrcDataSourceId().attachToException(e);
                 throw new UncheckedIOException(e);
+            }
+            catch (RuntimeException e) {
+                OrcSelectiveRecordReader.this.getOrcDataSourceId().attachToException(e);
+                throw e;
             }
 
             Block block = reader.getBlock(positions, positionCount);

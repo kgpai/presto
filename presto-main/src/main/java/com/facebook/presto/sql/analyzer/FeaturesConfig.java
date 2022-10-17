@@ -232,6 +232,12 @@ public class FeaturesConfig
 
     private double hyperloglogStandardErrorWarningThreshold = 0.004;
 
+    private boolean pushRemoteExchangeThroughGroupId;
+    private boolean isOptimizeMultipleApproxPercentileOnSameFieldEnabled = true;
+    private boolean nativeExecutionEnabled;
+    private String nativeExecutionExecutablePath = "./presto_server";
+    private boolean randomizeOuterJoinNullKey;
+
     public enum PartitioningPrecisionStrategy
     {
         // Let Presto decide when to repartition
@@ -2160,6 +2166,70 @@ public class FeaturesConfig
     public FeaturesConfig setQuickDistinctLimitEnabled(boolean quickDistinctLimitEnabled)
     {
         this.quickDistinctLimitEnabled = quickDistinctLimitEnabled;
+        return this;
+    }
+
+    public boolean isPushRemoteExchangeThroughGroupId()
+    {
+        return pushRemoteExchangeThroughGroupId;
+    }
+
+    @Config("optimizer.push-remote-exchange-through-group-id")
+    public FeaturesConfig setPushRemoteExchangeThroughGroupId(boolean value)
+    {
+        this.pushRemoteExchangeThroughGroupId = value;
+        return this;
+    }
+
+    public boolean isOptimizeMultipleApproxPercentileOnSameFieldEnabled()
+    {
+        return isOptimizeMultipleApproxPercentileOnSameFieldEnabled;
+    }
+
+    @Config("optimizer.optimize-multiple-approx-percentile-on-same-field")
+    @ConfigDescription("Enable combining individual approx_percentile calls on the same individual field to evaluation on an array")
+    public FeaturesConfig setOptimizeMultipleApproxPercentileOnSameFieldEnabled(boolean isOptimizeMultipleApproxPercentileOnSameFieldEnabled)
+    {
+        this.isOptimizeMultipleApproxPercentileOnSameFieldEnabled = isOptimizeMultipleApproxPercentileOnSameFieldEnabled;
+        return this;
+    }
+
+    @Config("native-execution-enabled")
+    @ConfigDescription("Enable execution on native engine")
+    public FeaturesConfig setNativeExecutionEnabled(boolean nativeExecutionEnabled)
+    {
+        this.nativeExecutionEnabled = nativeExecutionEnabled;
+        return this;
+    }
+
+    public boolean isNativeExecutionEnabled()
+    {
+        return this.nativeExecutionEnabled;
+    }
+
+    @Config("native-execution-executable-path")
+    @ConfigDescription("Native execution executable file path")
+    public FeaturesConfig setNativeExecutionExecutablePath(String nativeExecutionExecutablePath)
+    {
+        this.nativeExecutionExecutablePath = nativeExecutionExecutablePath;
+        return this;
+    }
+
+    public String getNativeExecutionExecutablePath()
+    {
+        return this.nativeExecutionExecutablePath;
+    }
+
+    public boolean isRandomizeOuterJoinNullKeyEnabled()
+    {
+        return randomizeOuterJoinNullKey;
+    }
+
+    @Config("optimizer.randomize-outer-join-null-key")
+    @ConfigDescription("Randomize null join key for outer join")
+    public FeaturesConfig setRandomizeOuterJoinNullKeyEnabled(boolean randomizeOuterJoinNullKey)
+    {
+        this.randomizeOuterJoinNullKey = randomizeOuterJoinNullKey;
         return this;
     }
 }

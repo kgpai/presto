@@ -39,6 +39,7 @@ import com.facebook.presto.geospatial.SpatialPartitioningInternalAggregateFuncti
 import com.facebook.presto.geospatial.SphericalGeoFunctions;
 import com.facebook.presto.geospatial.aggregation.ConvexHullAggregation;
 import com.facebook.presto.geospatial.aggregation.GeometryUnionAgg;
+import com.facebook.presto.operator.aggregation.AlternativeApproxPercentile;
 import com.facebook.presto.operator.aggregation.ApproximateCountDistinctAggregation;
 import com.facebook.presto.operator.aggregation.ApproximateDoublePercentileAggregations;
 import com.facebook.presto.operator.aggregation.ApproximateDoublePercentileArrayAggregations;
@@ -101,6 +102,8 @@ import com.facebook.presto.operator.scalar.ArrayElementAtFunction;
 import com.facebook.presto.operator.scalar.ArrayEqualOperator;
 import com.facebook.presto.operator.scalar.ArrayExceptFunction;
 import com.facebook.presto.operator.scalar.ArrayFilterFunction;
+import com.facebook.presto.operator.scalar.ArrayFindFirstFirstFunction;
+import com.facebook.presto.operator.scalar.ArrayFindFirstWithOffsetFunction;
 import com.facebook.presto.operator.scalar.ArrayFunctions;
 import com.facebook.presto.operator.scalar.ArrayGreaterThanOperator;
 import com.facebook.presto.operator.scalar.ArrayGreaterThanOrEqualOperator;
@@ -640,12 +643,6 @@ public class BuiltInTypeAndFunctionNamespaceManager
                 .aggregates(CountAggregation.class)
                 .aggregates(VarianceAggregation.class)
                 .aggregates(CentralMomentsAggregation.class)
-                .aggregates(ApproximateLongPercentileAggregations.class)
-                .aggregates(ApproximateLongPercentileArrayAggregations.class)
-                .aggregates(ApproximateDoublePercentileAggregations.class)
-                .aggregates(ApproximateDoublePercentileArrayAggregations.class)
-                .aggregates(ApproximateRealPercentileAggregations.class)
-                .aggregates(ApproximateRealPercentileArrayAggregations.class)
                 .aggregates(CountIfAggregation.class)
                 .aggregates(BooleanAndAggregation.class)
                 .aggregates(BooleanOrAggregation.class)
@@ -808,6 +805,8 @@ public class BuiltInTypeAndFunctionNamespaceManager
                 .scalar(ArrayNgramsFunction.class)
                 .scalar(ArrayAllMatchFunction.class)
                 .scalar(ArrayAnyMatchFunction.class)
+                .scalar(ArrayFindFirstFirstFunction.class)
+                .scalar(ArrayFindFirstWithOffsetFunction.class)
                 .scalar(ArrayNoneMatchFunction.class)
                 .scalar(ArrayNormalizeFunction.class)
                 .scalar(MapDistinctFromOperator.class)
@@ -931,6 +930,15 @@ public class BuiltInTypeAndFunctionNamespaceManager
             builder.override(MIN_AGGREGATION, ALTERNATIVE_MIN);
             builder.override(MAX_BY, ALTERNATIVE_MAX_BY);
             builder.override(MIN_BY, ALTERNATIVE_MIN_BY);
+            builder.functions(AlternativeApproxPercentile.getFunctions());
+        }
+        else {
+            builder.aggregates(ApproximateLongPercentileAggregations.class);
+            builder.aggregates(ApproximateLongPercentileArrayAggregations.class);
+            builder.aggregates(ApproximateDoublePercentileAggregations.class);
+            builder.aggregates(ApproximateDoublePercentileArrayAggregations.class);
+            builder.aggregates(ApproximateRealPercentileAggregations.class);
+            builder.aggregates(ApproximateRealPercentileArrayAggregations.class);
         }
 
         return builder.getFunctions();

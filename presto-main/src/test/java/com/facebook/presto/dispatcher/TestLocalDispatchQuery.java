@@ -15,6 +15,8 @@ package com.facebook.presto.dispatcher;
 
 import com.facebook.airlift.node.NodeInfo;
 import com.facebook.presto.Session;
+import com.facebook.presto.cost.HistoryBasedOptimizationConfig;
+import com.facebook.presto.cost.HistoryBasedPlanStatisticsManager;
 import com.facebook.presto.event.QueryMonitor;
 import com.facebook.presto.event.QueryMonitorConfig;
 import com.facebook.presto.eventlistener.EventListenerManager;
@@ -43,6 +45,7 @@ import com.facebook.presto.spi.prerequisites.QueryPrerequisitesContext;
 import com.facebook.presto.spi.resourceGroups.ResourceGroupId;
 import com.facebook.presto.spi.security.AccessDeniedException;
 import com.facebook.presto.transaction.TransactionManager;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.util.concurrent.SettableFuture;
 import io.airlift.units.Duration;
@@ -450,7 +453,8 @@ public class TestLocalDispatchQuery
                 UNKNOWN,
                 new SessionPropertyManager(),
                 metadata,
-                new QueryMonitorConfig());
+                new QueryMonitorConfig(),
+                new HistoryBasedPlanStatisticsManager(new ObjectMapper(), new SessionPropertyManager(), metadata, new HistoryBasedOptimizationConfig()));
     }
 
     private EventListenerManager createEventListenerManager(CountingEventListener countingEventListener)

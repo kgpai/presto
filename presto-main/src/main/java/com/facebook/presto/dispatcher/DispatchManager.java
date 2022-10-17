@@ -15,6 +15,7 @@ package com.facebook.presto.dispatcher;
 
 import com.facebook.airlift.concurrent.BoundedExecutor;
 import com.facebook.presto.Session;
+import com.facebook.presto.common.resourceGroups.QueryType;
 import com.facebook.presto.execution.QueryIdGenerator;
 import com.facebook.presto.execution.QueryInfo;
 import com.facebook.presto.execution.QueryManagerConfig;
@@ -31,11 +32,14 @@ import com.facebook.presto.server.BasicQueryInfo;
 import com.facebook.presto.server.SessionContext;
 import com.facebook.presto.server.SessionPropertyDefaults;
 import com.facebook.presto.server.SessionSupplier;
+import com.facebook.presto.server.security.SecurityConfig;
 import com.facebook.presto.spi.PrestoException;
 import com.facebook.presto.spi.QueryId;
-import com.facebook.presto.spi.resourceGroups.QueryType;
 import com.facebook.presto.spi.resourceGroups.SelectionContext;
 import com.facebook.presto.spi.resourceGroups.SelectionCriteria;
+import com.facebook.presto.spi.security.AccessControlContext;
+import com.facebook.presto.spi.security.AuthorizedIdentity;
+import com.facebook.presto.spi.security.Identity;
 import com.facebook.presto.transaction.TransactionManager;
 import com.google.common.util.concurrent.AbstractFuture;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -83,6 +87,8 @@ public class DispatchManager
 
     private final QueryManagerStats stats = new QueryManagerStats();
 
+    private final SecurityConfig securityConfig;
+
     @Inject
     public DispatchManager(
             QueryIdGenerator queryIdGenerator,
@@ -97,7 +103,8 @@ public class DispatchManager
             SessionPropertyDefaults sessionPropertyDefaults,
             QueryManagerConfig queryManagerConfig,
             DispatchExecutor dispatchExecutor,
-            ClusterStatusSender clusterStatusSender)
+            ClusterStatusSender clusterStatusSender,
+            SecurityConfig securityConfig)
     {
         this.queryIdGenerator = requireNonNull(queryIdGenerator, "queryIdGenerator is null");
         this.queryPreparer = requireNonNull(queryPreparer, "queryPreparer is null");
@@ -118,6 +125,8 @@ public class DispatchManager
         this.clusterStatusSender = requireNonNull(clusterStatusSender, "clusterStatusSender is null");
 
         this.queryTracker = new QueryTracker<>(queryManagerConfig, dispatchExecutor.getScheduledExecutor());
+
+        this.securityConfig = requireNonNull(securityConfig, "securityConfig is null");
     }
 
     @PostConstruct
@@ -179,8 +188,14 @@ public class DispatchManager
                 throw new PrestoException(QUERY_TEXT_TOO_LARGE, format("Query text length (%s) exceeds the maximum length (%s)", queryLength, maxQueryLength));
             }
 
+            // check permissions if needed
+            checkPermissions(queryId, sessionContext);
+
+            // get authorized identity if possible
+            Optional<AuthorizedIdentity> authorizedIdentity = getAuthorizedIdentity(queryId, sessionContext);
+
             // decode session
-            session = sessionSupplier.createSession(queryId, sessionContext, warningCollectorFactory);
+            session = sessionSupplier.createSession(queryId, sessionContext, warningCollectorFactory, authorizedIdentity);
 
             // prepare query
             preparedQuery = queryPreparer.prepareQuery(session, query, session.getWarningCollector());
@@ -194,7 +209,8 @@ public class DispatchManager
                     Optional.ofNullable(sessionContext.getSource()),
                     sessionContext.getClientTags(),
                     sessionContext.getResourceEstimates(),
-                    queryType.map(Enum::name)));
+                    queryType.map(Enum::name),
+                    Optional.ofNullable(sessionContext.getClientInfo())));
 
             // apply system default session properties (does not override user set properties)
             session = sessionPropertyDefaults.newSessionWithDefaultProperties(session, queryType.map(Enum::name), Optional.of(selectionContext.getResourceGroupId()));
@@ -237,6 +253,46 @@ public class DispatchManager
             DispatchQuery failedDispatchQuery = failedDispatchQueryFactory.createFailedDispatchQuery(session, query, Optional.empty(), throwable);
             queryCreated(failedDispatchQuery);
         }
+    }
+
+    /**
+     * When selectAuthorizedIdentity API is not enabled, we check the delegation permission
+     */
+    private void checkPermissions(QueryId queryId, SessionContext sessionContext)
+    {
+        Identity identity = sessionContext.getIdentity();
+        if (!securityConfig.isAuthorizedIdentitySelectionEnabled()) {
+            accessControl.checkCanSetUser(
+                    identity,
+                    new AccessControlContext(
+                            queryId,
+                            Optional.ofNullable(sessionContext.getClientInfo()),
+                            Optional.ofNullable(sessionContext.getSource())),
+                    identity.getPrincipal(),
+                    identity.getUser());
+        }
+    }
+
+    /**
+     * When selectAuthorizedIdentity API is enabled,
+     * 1. Check the delegation permission, which is inside the API call
+     * 2. Select and return the authorized identity
+     */
+    private Optional<AuthorizedIdentity> getAuthorizedIdentity(QueryId queryId, SessionContext sessionContext)
+    {
+        if (securityConfig.isAuthorizedIdentitySelectionEnabled()) {
+            Identity identity = sessionContext.getIdentity();
+            AuthorizedIdentity authorizedIdentity = accessControl.selectAuthorizedIdentity(
+                    identity,
+                    new AccessControlContext(
+                            queryId,
+                            Optional.ofNullable(sessionContext.getClientInfo()),
+                            Optional.ofNullable(sessionContext.getSource())),
+                    identity.getUser(),
+                    sessionContext.getCertificates());
+            return Optional.of(authorizedIdentity);
+        }
+        return Optional.empty();
     }
 
     private boolean queryCreated(DispatchQuery dispatchQuery)
